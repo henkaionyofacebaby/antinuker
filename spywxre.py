@@ -72,17 +72,13 @@ class StyledEmbed(_DiscordEmbed):
         return super().add_field(name=name, value=value, inline=inline)
 
 # ==================== CONFIGURATION ====================
-# Railway can use DISCORD_TOKEN, TOKEN, or BOT_TOKEN as the secret variable name.
-# Environment variables take priority over the private config.json fallback below.
+# Railway authentication: read the token ONLY from the environment.
+# Do not fall back to config.json; an old token there can cause 401 Unauthorized.
 def _read_environment_token():
-    for _name in ("DISCORD_TOKEN", "TOKEN", "BOT_TOKEN"):
-        _value = os.getenv(_name, "").strip()
-        if _value:
-            # discord.py expects the raw token, without an optional "Bot " prefix.
-            if _value.lower().startswith("bot "):
-                _value = _value[4:].strip()
-            return _value
-    return ""
+    value = os.getenv("DISCORD_TOKEN", "").strip()
+    if value.lower().startswith("bot "):
+        value = value[4:].strip()
+    return value
 
 TOKEN = _read_environment_token()
 PREFIX = "!"
@@ -225,14 +221,7 @@ def load_config():
     return result
 config = load_config()
 
-# OriHost fallback: environment variable takes priority; otherwise read the
-# token from the existing private config.json file. Never print the token.
-if not TOKEN:
-    _config_token = config.get("token", "")
-    if isinstance(_config_token, str):
-        TOKEN = _config_token.strip()
-        if TOKEN.lower().startswith("bot "):
-            TOKEN = TOKEN[4:].strip()
+# Bot credentials are intentionally not loaded from config.json.
 
 def guild_security_settings(guild):
     """Return mutable per-server settings, with moderation features OFF by default."""
@@ -4529,8 +4518,8 @@ async def main():
     if not TOKEN:
         raise SystemExit(
             "Bot token is missing. In Railway > antinuker > Variables, add DISCORD_TOKEN "
-            "with the raw bot token as its value. TOKEN and BOT_TOKEN are also accepted. "
-            "Alternatively, config.json may contain a private top-level \"token\" value."
+            "with the raw bot token copied from Discord Developer Portal > Bot. "
+            "The token must not be stored in config.json."
         )
 
     retry_delay = 5
@@ -4546,7 +4535,8 @@ async def main():
                 logger.critical(
                     "Discord rejected the bot token (401 Unauthorized). Update the secret in "
                     "Railway Variables using the current token from Developer Portal > Bot. "
-                    "Check for a stale token in config.json. The token is not printed."
+                    "This version reads only DISCORD_TOKEN; config.json is not used for credentials. "
+                    "The token is not printed."
                 )
                 raise SystemExit(1) from error
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
