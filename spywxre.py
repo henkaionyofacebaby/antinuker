@@ -504,18 +504,26 @@ async def send_log(guild, title, description, color=None):
     except discord.HTTPException:
         logger.warning("Could not send opt-in log in guild %s", guild.id)
 async def notify_owners(guild, message):
+    """Send anti-nuke alerts to configured bot owners as branded embeds."""
     if not config.get("notify_owner", True):
         return
+
+    embed = StyledEmbed(
+        title="$pyX Security | Anti-Nuke Alert",
+        description=(message or "An anti-nuke event was detected.")[:4000],
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Server", value=f"{guild.name[:200]}\n`{guild.id}`", inline=False)
+    embed.set_footer(text="$pyX Security • Owner Notification")
+
     for owner_id in config.get("owner_ids", []):
         try:
-            user = bot.get_user(owner_id)
+            user = bot.get_user(int(owner_id))
             if user is None:
-                user = await bot.fetch_user(owner_id)
-            await user.send(
-                f"**$pyX Security Alert — {guild.name}**\n"
-                f"{message[:1800]}"
-            )
-        except (discord.HTTPException, discord.Forbidden):
+                user = await bot.fetch_user(int(owner_id))
+            await user.send(embed=embed)
+        except (discord.HTTPException, discord.Forbidden, TypeError, ValueError):
             continue
 # Keep a short per-member message history and prevent repeated punishment.
 
