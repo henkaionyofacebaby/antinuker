@@ -72,7 +72,19 @@ class StyledEmbed(_DiscordEmbed):
         return super().add_field(name=name, value=value, inline=inline)
 
 # ==================== CONFIGURATION ====================
-TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+# Railway can use DISCORD_TOKEN, TOKEN, or BOT_TOKEN as the secret variable name.
+# Environment variables take priority over the private config.json fallback below.
+def _read_environment_token():
+    for _name in ("DISCORD_TOKEN", "TOKEN", "BOT_TOKEN"):
+        _value = os.getenv(_name, "").strip()
+        if _value:
+            # discord.py expects the raw token, without an optional "Bot " prefix.
+            if _value.lower().startswith("bot "):
+                _value = _value[4:].strip()
+            return _value
+    return ""
+
+TOKEN = _read_environment_token()
 PREFIX = "!"
 DEVELOPER_ID = 1524801139227361403
 CONFIG_FILE = "config.json"
@@ -219,6 +231,8 @@ if not TOKEN:
     _config_token = config.get("token", "")
     if isinstance(_config_token, str):
         TOKEN = _config_token.strip()
+        if TOKEN.lower().startswith("bot "):
+            TOKEN = TOKEN[4:].strip()
 
 def guild_security_settings(guild):
     """Return mutable per-server settings, with moderation features OFF by default."""
@@ -4514,9 +4528,11 @@ async def slash_error(interaction, error):
 async def main():
     if not TOKEN:
         raise SystemExit(
-            "Bot token is missing. Add a top-level \"token\" value to your existing config.json, "
-            "or configure DISCORD_TOKEN in the hosting panel."
+            "Bot token is missing. In Railway > antinuker > Variables, add DISCORD_TOKEN "
+            "with the raw bot token as its value. TOKEN and BOT_TOKEN are also accepted. "
+            "Alternatively, config.json may contain a private top-level \"token\" value."
         )
+
     retry_delay = 5
     async with bot:
         while True:
@@ -4524,15 +4540,23 @@ async def main():
                 await bot.start(TOKEN)
                 # start() normally runs until the bot closes; return if it exits cleanly.
                 break
+            except discord.LoginFailure as error:
+                # 401 Unauthorized means the supplied token is invalid, revoked, or wrong.
+                # It is not a transient network failure, so do not retry in a restart loop.
+                logger.critical(
+                    "Discord rejected the bot token (401 Unauthorized). Update the secret in "
+                    "Railway Variables using the current token from Developer Portal > Bot. "
+                    "Check for a stale token in config.json. The token is not printed."
+                )
+                raise SystemExit(1) from error
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
-                # Covers temporary DNS/TCP/HTTPS connection failures. Invalid tokens
-                # and other Discord login errors are intentionally not swallowed.
                 logger.warning(
                     "Temporary Discord connection failure: %s. Retrying in %s seconds.",
                     error, retry_delay
                 )
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
