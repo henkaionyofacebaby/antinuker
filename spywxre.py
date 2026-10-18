@@ -26,68 +26,69 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-# ==================== CLEAN EMBED BRANDING ====================
-EMBED_PURPLE = discord.Color.from_rgb(35, 0, 55)
-EMBED_FOOTER_TEXT = "$pyX Security • Developed by SPYWXRE"
+# ==================== EMBED STYLE ====================
+_DiscordEmbed = discord.Embed
+_EMBED_PURPLE = discord.Color.from_rgb(35, 0, 55)
 
+def _clean_embed_text(value):
+    """Normalize whitespace without changing the meaning of command output."""
+    if not isinstance(value, str):
+        return value
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
 
-def clean_embed(**kwargs):
-    """Apply a consistent, readable $pyX style without discarding custom content."""
-    if kwargs.get("color") is None:
-        kwargs["color"] = EMBED_PURPLE
+class StyledEmbed(_DiscordEmbed):
+    """Consistent $pyX branding with readable spacing and safe defaults."""
+    def __init__(self, *args, **kwargs):
+        if "color" not in kwargs and len(args) < 5:
+            kwargs["color"] = _EMBED_PURPLE
+        if isinstance(kwargs.get("title"), str):
+            kwargs["title"] = _clean_embed_text(kwargs["title"])
+        if isinstance(kwargs.get("description"), str):
+            kwargs["description"] = _clean_embed_text(kwargs["description"])
+        super().__init__(*args, **kwargs)
+        bot_obj = globals().get("bot")
+        user = getattr(bot_obj, "user", None) if bot_obj else None
+        # Optional shared banner used as the default image on embeds.
+        # Set EMBED_BANNER_URL in the host environment to a direct HTTPS image URL.
+        # Commands that call set_image() later (e.g. avatar/banner lookups) replace it.
+        configured_banner = os.getenv("EMBED_BANNER_URL", "").strip()
+        bot_banner = getattr(user, "banner", None) if user else None
+        default_banner_url = configured_banner or (bot_banner.url if bot_banner else None)
+        if default_banner_url and not self.image.url:
+            self.set_image(url=default_banner_url)
+        if not self.author.name:
+            self.set_author(
+                name="$pyX Security",
+                icon_url=user.display_avatar.url if user else None,
+            )
+        if not self.footer.text:
+            self.set_footer(
+                text="$pyX Security • Developed by SPYWXRE",
+                icon_url=user.display_avatar.url if user else None,
+            )
 
-    # Do not add timestamps to every ordinary response; they make command embeds
-    # visually noisy. Security logs can still request a timestamp explicitly.
-    description = kwargs.get("description")
-    if isinstance(description, str):
-        description = description.strip()
-        description = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", description)
-        kwargs["description"] = description or None
-
-    # Give every embed a consistent symbol-led title without duplicating decoration.
-    if isinstance(kwargs.get("title"), str):
-        title = kwargs["title"].strip()
-        if title and not title.startswith(("✦", "╭", "୨", "⟡", "『")):
-            title = f"✦・{title}"
-        kwargs["title"] = title[:256]
-
-    embed = discord.Embed(**kwargs)
-    bot_obj = globals().get("bot")
-    bot_user = getattr(bot_obj, "user", None)
-    avatar_asset = getattr(bot_user, "display_avatar", None)
-    avatar_url = str(avatar_asset.url) if avatar_asset else None
-
-    # A compact author line places the bot avatar on the left above the title.
-    # Preserve any command-specific author text and URL.
-    existing_author_name = embed.author.name
-    existing_author_url = embed.author.url
-    if avatar_url:
-        embed.set_author(
-            name=existing_author_name or "✦・$pyX Security・✦",
-            url=existing_author_url or None,
-            icon_url=avatar_url,
-        )
-    elif not existing_author_name:
-        embed.set_author(name="✦・$pyX Security・✦")
-
-    # Consistent footer with bot avatar, while preserving custom footer text/icons.
-    if not embed.footer.text:
-        if avatar_url:
-            embed.set_footer(text=EMBED_FOOTER_TEXT, icon_url=avatar_url)
-        else:
-            embed.set_footer(text=EMBED_FOOTER_TEXT)
-
-    # Use the bot's profile banner across embeds when available. Explicit command
-    # images (avatars, server banners, attachments) always take priority. Discord
-    # renders embed images below the text/fields.
-    banner = getattr(bot_user, "banner", None)
-    if banner and not embed.image.url:
-        embed.set_image(url=banner.url)
-
-    return embed
+    def add_field(self, *, name, value, inline=True):
+        name = _clean_embed_text(name)
+        value = _clean_embed_text(value)
+        if not name:
+            name = "Details"
+        if not value:
+            value = "—"
+        return super().add_field(name=name, value=value, inline=inline)
 
 # ==================== CONFIGURATION ====================
-TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+# Railway authentication: read the token ONLY from the environment.
+# Do not fall back to config.json; an old token there can cause 401 Unauthorized.
+def _read_environment_token():
+    value = os.getenv("DISCORD_TOKEN", "").strip()
+    if value.lower().startswith("bot "):
+        value = value[4:].strip()
+    return value
+
+TOKEN = _read_environment_token()
 PREFIX = "!"
 DEVELOPER_ID = 1524801139227361403
 CONFIG_FILE = "config.json"
@@ -99,9 +100,7 @@ DEFAULT_CONFIG = {
     "guild_prefixes": {},
     "whitelist": [],
     "guild_whitelists": {},
-    "antinuke_enabled": True,
     "antispam_enabled": False,
-    "antilink_enabled": False,
     "antispam_window_seconds": 4,
     "antispam_message_limit": 3,
     "antispam_duplicate_limit": 3,
@@ -109,6 +108,8 @@ DEFAULT_CONFIG = {
     "antispam_timeout_seconds": 300,
     "antispam_delete_messages": True,
     "antispam_exempt_admins": False,
+    "antilink_enabled": False,
+    "antinuke_enabled": True,
     "raid_protection": True,
     "raid_join_threshold": 8,
     "raid_window_seconds": 10,
@@ -174,21 +175,6 @@ def load_config():
             result[key] = value
     if isinstance(saved.get("thresholds"), dict):
         result["thresholds"].update(saved["thresholds"])
-    # Accept both the current flat anti-spam keys and the nested config format.
-    nested_antispam = saved.get("antispam", {})
-    if isinstance(nested_antispam, dict):
-        nested_to_flat = {
-            "enabled": "antispam_enabled",
-            "window_seconds": "antispam_window_seconds",
-            "message_threshold": "antispam_message_limit",
-            "duplicate_threshold": "antispam_duplicate_limit",
-            "mention_threshold": "antispam_mention_limit",
-            "timeout_seconds": "antispam_timeout_seconds",
-            "delete_messages": "antispam_delete_messages",
-        }
-        for nested_key, flat_key in nested_to_flat.items():
-            if nested_key in nested_antispam:
-                result[flat_key] = nested_antispam[nested_key]
     result["owner_ids"] = [
         int(value)
         for value in result.get("owner_ids", [])
@@ -243,26 +229,32 @@ def load_config():
     return result
 config = load_config()
 
-# OriHost fallback: environment variable takes priority; otherwise read the
-# token from the existing private config.json file. Never print the token.
-if not TOKEN:
-    _config_token = config.get("token", "")
-    if isinstance(_config_token, str):
-        TOKEN = _config_token.strip()
+# Bot credentials are intentionally not loaded from config.json.
 
 def guild_security_settings(guild):
-    """Return mutable security settings scoped to one server."""
+    """Return mutable per-server settings, with moderation features OFF by default."""
     if guild is None:
         return {}
-    return config.setdefault("guild_security_settings", {}).setdefault(str(guild.id), {})
+    all_settings = config.setdefault("guild_security_settings", {})
+    settings = all_settings.setdefault(str(guild.id), {})
+    # Explicit per-guild defaults: each server starts with anti-spam and anti-link OFF.
+    # Existing explicit ON/OFF choices are preserved.
+    changed = False
+    if "antispam_enabled" not in settings:
+        settings["antispam_enabled"] = False
+        changed = True
+    if "antilink_enabled" not in settings:
+        settings["antilink_enabled"] = False
+        changed = True
+    if changed:
+        save_config()
+    return settings
 
 def get_guild_setting(guild, key, default=None):
-    """Read per-server settings; anti-spam/link are OFF until explicitly enabled per guild."""
+    """Read a per-server setting, falling back to legacy global settings."""
     settings = guild_security_settings(guild)
     if key in settings:
         return settings[key]
-    if key in ("antispam_enabled", "antilink_enabled"):
-        return False
     return config.get(key, default)
 
 def set_guild_setting(guild, key, value):
@@ -270,9 +262,6 @@ def set_guild_setting(guild, key, value):
     settings = guild_security_settings(guild)
     settings[key] = value
     save_config()
-
-def bot_staff_or_server_admin(user):
-    return has_admin_access(user)
 
 def is_link_exempt(message):
     guild = message.guild
@@ -302,11 +291,52 @@ def domain_is_allowed(domain, allowed_domains):
     domain = domain.lower().strip().lstrip(".")
     return any(domain == item.lower().strip().lstrip(".") or domain.endswith("." + item.lower().strip().lstrip(".")) for item in allowed_domains if isinstance(item, str) and item.strip())
 
+
+def bot_staff_or_server_admin(user):
+    return has_admin_access(user)
+
+
+
+
 def save_config():
     temporary = CONFIG_FILE + ".tmp"
     with open(temporary, "w", encoding="utf-8") as file:
         json.dump(config, file, indent=4)
     os.replace(temporary, CONFIG_FILE)
+
+
+# ==================== LEGACY ANTI-SPAM / ANTI-LINK SETTINGS ====================
+def migrate_legacy_moderation_settings():
+    """Restore the original per-server anti-spam and anti-link setting names."""
+    guild_settings = config.setdefault("guild_security_settings", {})
+    if not isinstance(guild_settings, dict):
+        config["guild_security_settings"] = {}
+        guild_settings = config["guild_security_settings"]
+    changed = False
+    for guild_id, settings in guild_settings.items():
+        if not isinstance(settings, dict):
+            continue
+        # Preserve an existing legacy setting; only migrate from AutoMod keys if absent.
+        if "antispam_enabled" not in settings and "anti_spam_enabled" in settings:
+            settings["antispam_enabled"] = bool(settings["anti_spam_enabled"])
+            changed = True
+        if "antilink_enabled" not in settings and "anti_link_enabled" in settings:
+            settings["antilink_enabled"] = bool(settings["anti_link_enabled"])
+            changed = True
+        if "antispam_message_limit" not in settings and "automod_spam_limit" in settings:
+            settings["antispam_message_limit"] = settings["automod_spam_limit"]
+            changed = True
+        if "antispam_window_seconds" not in settings and "automod_spam_window" in settings:
+            settings["antispam_window_seconds"] = settings["automod_spam_window"]
+            changed = True
+        if "antispam_timeout_seconds" not in settings and "automod_timeout_seconds" in settings:
+            settings["antispam_timeout_seconds"] = settings["automod_timeout_seconds"]
+            changed = True
+    if changed:
+        save_config()
+        logger.info("Migrated AutoMod settings to legacy anti-spam/anti-link settings")
+
+migrate_legacy_moderation_settings()
 # ==================== STATE ====================
 afk_users = {}
 channel_snapshots = {}
@@ -326,6 +356,9 @@ SLASH_COMMANDS_SYNCED = False
 # ==================== BOT ====================
 intents = discord.Intents.default()
 intents.guilds = True
+# Required to inspect message text for anti-spam and anti-link enforcement.
+# Also enable Message Content Intent in the Discord Developer Portal.
+intents.message_content = True
 intents.members = True
 intents.moderation = True
 intents.message_content = True
@@ -421,7 +454,7 @@ async def require_premium(ctx):
         return True
     if is_premium_guild(ctx.guild):
         return True
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Premium Required",
         description=(
             "This command is available only in **Premium-enabled servers**.\n"
@@ -467,7 +500,7 @@ async def send_log(guild, title, description, color=None):
         return
     if guild.me and not channel.permissions_for(guild.me).send_messages:
         return
-    embed = clean_embed(
+    embed = StyledEmbed(
         title=title,
         description=description[:4000],
         color=color,
@@ -479,200 +512,54 @@ async def send_log(guild, title, description, color=None):
     except discord.HTTPException:
         logger.warning("Could not send opt-in log in guild %s", guild.id)
 async def notify_owners(guild, message):
+    """Send anti-nuke alert embeds to the developer and configured owner IDs."""
     if not config.get("notify_owner", True):
+        logger.info("Owner anti-nuke DM skipped: notify_owner is disabled.")
         return
-    for owner_id in config.get("owner_ids", []):
+
+    # Include the configured developer ID as well as any extra owners. Previously
+    # this loop used only config["owner_ids"], which defaults to [], so a fresh
+    # config silently sent alerts to nobody.
+    raw_owner_ids = [DEVELOPER_ID, *config.get("owner_ids", [])]
+    owner_ids = []
+    for value in raw_owner_ids:
+        try:
+            owner_id = int(value)
+            if owner_id > 0 and owner_id not in owner_ids:
+                owner_ids.append(owner_id)
+        except (TypeError, ValueError):
+            continue
+
+    if not owner_ids:
+        logger.error("Owner anti-nuke DM not sent: no valid owner IDs configured.")
+        return
+
+    embed = StyledEmbed(
+        title="$pyX Security | Anti-Nuke Alert",
+        description=(message or "An anti-nuke event was detected.")[:4000],
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Server", value=f"{guild.name[:200]}\n`{guild.id}`", inline=False)
+    embed.set_footer(text="$pyX Security • Owner Notification")
+
+    for owner_id in owner_ids:
         try:
             user = bot.get_user(owner_id)
             if user is None:
                 user = await bot.fetch_user(owner_id)
-            await user.send(
-                f"**$pyX Security Alert — {guild.name}**\n"
-                f"{message[:1800]}"
-            )
-        except (discord.HTTPException, discord.Forbidden):
-            continue
-# ==================== ANTI-SPAM ENFORCEMENT ====================
-# Keep a short per-member message history and prevent repeated punishment.
-spam_message_history = defaultdict(deque)
-spam_action_cooldowns = {}
-
-@bot.listen("on_message")
-async def antispam_message_listener(message):
-    """Delete detected spam and timeout the sender when permissions allow."""
-    if message.guild is None or message.author.bot:
-        return
-    guild = message.guild
-    if not bool(get_guild_setting(guild, "antispam_enabled", False)):
-        return
-
-    member = message.author
-    if not isinstance(member, discord.Member):
-        member = guild.get_member(message.author.id)
-    if member is None:
-        return
-    # Anti-spam is evaluated independently of the anti-nuke whitelist.
-    # Whitelisted users can still be detected for spam; administrator exemptions
-    # remain controlled by antispam_exempt_admins below.
-    if member.id == guild.owner_id:
-        return
-    if config.get("antispam_exempt_admins", False) and member.guild_permissions.administrator:
-        return
-
-    now = time.monotonic()
-    # Fast-response defaults: trigger after 3 messages in a 4-second window.
-    # Cap legacy config thresholds at 3 so older config.json values do not keep
-    # the detector unnecessarily slow; lower configured values are respected.
-    window = max(1, min(30, int(get_guild_setting(guild, "antispam_window_seconds", 4))))
-    message_limit = max(2, min(20, int(get_guild_setting(guild, "antispam_message_limit", 3))))
-    duplicate_limit = max(2, min(20, int(get_guild_setting(guild, "antispam_duplicate_limit", 3))))
-    mention_limit = max(1, int(get_guild_setting(guild, "antispam_mention_limit", 6)))
-    timeout_seconds = max(1, int(get_guild_setting(guild, "antispam_timeout_seconds", 300)))
-
-    key = (guild.id, message.channel.id, member.id)
-    history = spam_message_history[key]
-    while history and now - history[0][0] > window:
-        history.popleft()
-    # Normalize whitespace and case so TESTING, testing, and extra spaces match.
-    normalized_content = " ".join((message.content or "").split()).casefold()
-    history.append((now, normalized_content, message))
-
-    duplicate_count = sum(
-        1 for _, content, _ in history
-        if normalized_content and content == normalized_content
-    )
-    mention_count = len(message.mentions) + len(message.role_mentions)
-    if message.mention_everyone:
-        mention_count = max(mention_count, mention_limit)
-
-    reason = None
-    if mention_count >= mention_limit:
-        reason = f"mention spam ({mention_count} mentions in one message)"
-    elif duplicate_count >= duplicate_limit:
-        reason = f"repeated-message spam ({duplicate_count} matching messages in {window}s)"
-    elif len(history) >= message_limit:
-        reason = f"rapid-message spam ({len(history)} messages in {window}s)"
-
-    if reason is None:
-        return
-
-    cooldown_key = (guild.id, member.id)
-    if now - spam_action_cooldowns.get(cooldown_key, 0) < 10:
-        return
-    spam_action_cooldowns[cooldown_key] = now
-    history_to_clean = list(history)
-    history.clear()
-
-    bot_member = guild.me
-    if bot_member is None:
-        logger.warning("Anti-spam: bot member unavailable in guild %s", guild.id)
-        return
-
-    deleted = 0
-
-    async def delete_spam_burst():
-        """Delete the burst efficiently, using Discord bulk-delete when possible."""
-        nonlocal deleted
-        if not bool(get_guild_setting(guild, "antispam_delete_messages", True)):
-            return
-        if not bot_member.guild_permissions.manage_messages:
-            logger.warning("Anti-spam detected in %s but bot lacks Manage Messages", guild.id)
-            return
-
-        candidates = []
-        seen_ids = set()
-        for _, _, spam_message in history_to_clean:
-            if spam_message.id not in seen_ids:
-                seen_ids.add(spam_message.id)
-                # Discord bulk deletion cannot include messages older than 14 days.
-                age = (discord.utils.utcnow() - spam_message.created_at).total_seconds()
-                if age < 14 * 24 * 60 * 60:
-                    candidates.append(spam_message)
-
-        if not candidates:
-            return
-        try:
-            if len(candidates) >= 2 and hasattr(message.channel, "delete_messages"):
-                await message.channel.delete_messages(candidates, reason="$pyX Security anti-spam cleanup")
-                deleted += len(candidates)
-            else:
-                await candidates[0].delete(reason="$pyX Security anti-spam cleanup")
-                deleted += 1
-        except discord.NotFound:
-            # Some messages may already have been deleted by a moderator/other bot.
-            pass
+            await user.send(embed=embed)
+            logger.info("Sent owner anti-nuke DM to user ID %s for guild %s.", owner_id, guild.id)
         except discord.Forbidden:
-            logger.warning("Anti-spam could not delete messages in guild %s", guild.id)
-        except discord.HTTPException as error:
-            # Bulk deletion can fail if the batch contains an invalid/old message;
-            # fall back to individual deletes rather than abandoning cleanup.
-            logger.warning("Anti-spam bulk delete failed in guild %s: %s; falling back", guild.id, error)
-            for spam_message in candidates:
-                try:
-                    await spam_message.delete(reason="$pyX Security anti-spam cleanup")
-                    deleted += 1
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    continue
-
-    async def apply_timeout():
-        nonlocal timed_out
-        if not bot_member.guild_permissions.moderate_members:
-            logger.warning("Anti-spam detected in %s but bot lacks Moderate Members", guild.id)
-            return
-        if member.top_role >= bot_member.top_role:
-            logger.warning("Anti-spam cannot timeout %s: member role is above/equal to bot role", member.id)
-            return
-        try:
-            await member.timeout(
-                timedelta(seconds=timeout_seconds),
-                reason=f"$pyX Security anti-spam: {reason}"
+            logger.warning(
+                "Could not DM owner ID %s: Discord blocked the DM (privacy settings, "
+                "blocked bot, or no available DM channel).", owner_id
             )
-            timed_out = True
-        except (discord.Forbidden, discord.HTTPException) as error:
-            logger.warning("Anti-spam timeout failed for %s: %s", member.id, error)
+        except (discord.HTTPException, TypeError, ValueError):
+            logger.exception("Could not send owner anti-nuke DM to user ID %s.", owner_id)
+# Keep a short per-member message history and prevent repeated punishment.
 
-    # Start enforcement actions together so message cleanup does not delay timeout.
-    timed_out = False
-    await asyncio.gather(delete_spam_burst(), apply_timeout())
 
-    status = (
-        f"**Member:** {member.mention} (`{member.id}`)\n"
-        f"**Detection:** {reason}\n"
-        f"**Messages deleted:** {deleted}\n"
-        f"**Timeout:** {'applied for ' + str(timeout_seconds) + ' seconds' if timed_out else 'not applied; check bot permissions and role hierarchy'}"
-    )
-    await send_log(guild, "Anti-Spam Action", status, discord.Color.orange())
-    logger.warning("Anti-spam action in guild %s for member %s: %s; deleted=%s; timeout=%s", guild.id, member.id, reason, deleted, timed_out)
-
-@bot.listen("on_message")
-async def antilink_message_listener(message):
-    """Delete links in servers that have independently enabled anti-link."""
-    guild = message.guild
-    if guild is None or message.author.bot or not bool(get_guild_setting(guild, "antilink_enabled", False)):
-        return
-    if is_link_exempt(message):
-        return
-    domains = extract_domains(message.content or "")
-    if not domains:
-        return
-    allowed = guild_security_settings(guild).get("antilink_whitelist", [])
-    blocked = [domain for domain in domains if not domain_is_allowed(domain, allowed)]
-    if not blocked:
-        return
-    try:
-        if guild.me and guild.me.guild_permissions.manage_messages:
-            await message.delete(reason="$pyX Security anti-link: prohibited link")
-        else:
-            logger.warning("Anti-link detected a link in guild %s but bot lacks Manage Messages", guild.id)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        pass
-    try:
-        warning = await message.channel.send(f"{message.author.mention}, links are not allowed in this server.")
-        await asyncio.sleep(5)
-        await warning.delete()
-    except (discord.Forbidden, discord.HTTPException):
-        pass
-    await send_log(guild, "Anti-link triggered", f"Removed a link from {message.author.mention} in {message.channel.mention}. Blocked domain(s): {', '.join(blocked)}", discord.Color.orange())
 
 # ==================== SERVER SNAPSHOTS ====================
 async def snapshot_guild(guild):
@@ -1067,6 +954,18 @@ async def on_audit_log_entry_create(entry):
         logger.exception("Audit log processing failed")
 @bot.event
 async def on_member_join(member):
+    # Log every member join independently from raid-protection settings.
+    account_age = discord.utils.utcnow() - member.created_at
+    age_days = max(0, account_age.days)
+    await send_log(
+        member.guild,
+        "✅ Member Joined",
+        f"**User:** {member.mention} (`{member.id}`)\n"
+        f"**Account Created:** {discord.utils.format_dt(member.created_at, style='R')}\n"
+        f"**Account Age:** {age_days} days\n"
+        f"**Member Count:** {member.guild.member_count or 'Unknown'}",
+        discord.Color.green()
+    )
     if member.bot or not config.get("raid_protection", True):
         return
     now = time.monotonic()
@@ -1079,14 +978,41 @@ async def on_member_join(member):
     if len(history) >= threshold:
         await send_log(
             member.guild,
-            "Possible join raid",
-            f"{len(history)} members joined within "
-            f"{window} seconds. Review the join activity.",
+            "⚠️ Possible Join Raid",
+            f"{len(history)} members joined within {window} seconds. Review the join activity.",
             discord.Color.orange()
         )
         history.clear()
+
+@bot.event
+async def on_member_remove(member):
+    await send_log(
+        member.guild,
+        "🚪 Member Left",
+        f"**User:** {member} (`{member.id}`)\n**Member Count:** {member.guild.member_count or 'Unknown'}",
+        discord.Color.orange()
+    )
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot or before.channel == after.channel:
+        return
+    if before.channel is None and after.channel is not None:
+        title = "🔊 Member Joined VC"
+        detail = f"**User:** {member.mention} (`{member.id}`)\n**Voice Channel:** {after.channel.mention}"
+        color = discord.Color.green()
+    elif before.channel is not None and after.channel is None:
+        title = "🔇 Member Left VC"
+        detail = f"**User:** {member.mention} (`{member.id}`)\n**Voice Channel:** {before.channel.mention}"
+        color = discord.Color.orange()
+    else:
+        title = "🔁 Member Switched VC"
+        detail = f"**User:** {member.mention} (`{member.id}`)\n**From:** {before.channel.mention}\n**To:** {after.channel.mention}"
+        color = discord.Color.blurple()
+    await send_log(member.guild, title, detail, color)
 @bot.event
 async def on_guild_channel_create(channel):
+    await send_log(channel.guild, "📁 Channel Created", f"**Name:** {channel.name}\n**ID:** `{channel.id}`\n**Type:** `{channel.type}`", discord.Color.green())
     # Refresh only the changed channel instead of rebuilding the whole guild snapshot.
     try:
         guild = channel.guild
@@ -1107,6 +1033,7 @@ async def on_guild_channel_create(channel):
 
 @bot.event
 async def on_guild_role_create(role):
+    await send_log(role.guild, "🆕 Role Created", f"**Name:** {role.name}\n**ID:** `{role.id}`\n**Color:** `{role.color}`\n**Mentionable:** `{role.mentionable}`", discord.Color.green())
     # Refresh only the new role to avoid repeated full-guild scans during bursts.
     try:
         guild = role.guild
@@ -1140,18 +1067,6 @@ async def manager_check(ctx):
         return False
     return True
 # ==================== PREFIX COMMANDS ====================
-@bot.command(name="ping", aliases=["latency"])
-async def ping_command(ctx):
-    """Show the bot's current Discord gateway latency."""
-    latency_ms = round(bot.latency * 1000)
-    embed = clean_embed(
-        title="📶 $pyX Security | Latency",
-        description=f"📶 latency is **{latency_ms} ms**!",
-        color=EMBED_PURPLE,
-    )
-    await ctx.reply(embed=embed, mention_author=False)
-
-
 @bot.command(name="help")
 async def help_command(ctx):
     """Show the regular server command guide."""
@@ -1159,7 +1074,7 @@ async def help_command(ctx):
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
     pfx = active_prefix
 
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Command Center",
         description=(
             "A server protection toolkit built to help moderators manage and secure their community.\n"
@@ -1199,13 +1114,12 @@ async def help_command(ctx):
         name="🔒 Server Protection",
         value=(
             f"`{pfx}antinuke on/off` — Enable or disable anti-nuke protection\n"
-            f"`{pfx}antispam on/off/status` — Configure or check anti-spam\n"
-            f"`{pfx}antilink on/off/status` — Enable, disable, or check anti-link filtering\n"
-            f"`{pfx}antilink allow <domain>` — Allow a domain through the link filter\n"
-            f"`{pfx}antilink deny <domain>` — Remove a domain from the allowed list\n"
-            f"`{pfx}antilink exempt @member` — Exempt a member from anti-link filtering\n"
-            f"`{pfx}antilink unexempt @member` — Remove a member's anti-link exemption\n"
             f"`{pfx}security` — View security status\n"
+            f"`{pfx}antispam on/off/status` — Configure per-server anti-spam\n"
+            f"`{pfx}antispam settings <window|messages|duplicates|mentions|timeout|delete> <value>` — Tune spam protection\n"
+            f"`{pfx}antilink on/off/status` — Configure per-server link filtering\n"
+            f"`{pfx}antilink allow <domain>` / `{pfx}antilink deny <domain>` — Manage allowed domains\n"
+            f"`{pfx}antilink exempt @member` / `{pfx}antilink unexempt @member` — Manage link exemptions\n"
             f"`{pfx}whitelist add @member` — Add a member to the whitelist\n"
             f"`{pfx}whitelist remove @member` — Remove a member from the whitelist\n"
             f"`{pfx}whitelist list` — View the server whitelist\n"
@@ -1231,8 +1145,9 @@ async def help_command(ctx):
             f"`{pfx}afk [message]` — Set your AFK status\n"
             f"`{pfx}sinfo` — View server information\n"
             f"`{pfx}info` — View $pyX Security information\n"
-            f"`{pfx}ping` — View bot latency\n"
             f"`{pfx}av [@user]` — View a user's avatar (Premium)\n"
+            f"`{pfx}banner [@user|user ID]` — View a user's Discord banner (Premium)\n"
+            f"`{pfx}ping` — Show bot gateway latency\n"
             f"`{pfx}joinvc` — Join your current voice channel"
         ),
         inline=False,
@@ -1270,67 +1185,95 @@ async def help_command(ctx):
     await ctx.reply(embed=embed, mention_author=False)
 
 
+class AdminHelpSelect(discord.ui.Select):
+    def __init__(self, ctx, prefix):
+        self.ctx = ctx
+        self.prefix = prefix
+        options = [
+            discord.SelectOption(label="Home", value="home", emoji="🏠", description="Overview of restricted staff commands", default=True),
+            discord.SelectOption(label="Premium", value="premium", emoji="💎", description="Manage Premium access and bot admins"),
+            discord.SelectOption(label="Prefix Access", value="prefix", emoji="🔑", description="Manage no-prefix permissions"),
+            discord.SelectOption(label="Bot Administration", value="admin", emoji="⚙️", description="Manage staff and view bot servers"),
+        ]
+        super().__init__(placeholder="Select an administrator category…", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the person who ran `admhelp` can use this menu.", ephemeral=True)
+            return
+        self.view.update_embed(self.values[0])
+        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+
+
+class AdminHelpView(discord.ui.View):
+    def __init__(self, ctx, prefix):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.prefix = prefix
+        self.add_item(AdminHelpSelect(ctx, prefix))
+        self.embed = None
+        self.update_embed("home")
+
+    def update_embed(self, category):
+        p = self.prefix
+        pages = {
+            "home": ("✦ $pyX Security | Staff Command Center",
+                     "Restricted bot-staff tools for Premium access, no-prefix permissions, and bot administration.\n\n"
+                     f"**Prefix:** `{p}`\n**Access:** Global bot staff only\n\n"
+                     "Select a category from the dropdown below to view command usage.\n"
+                     "These commands are not intended for ordinary server administrators."),
+            "premium": ("💎 Premium & Bot Admin Management",
+                        f"`{p}premium add <server_id>` — Enable Premium for a server (developer only)\n"
+                        f"`{p}premium remove <server_id>` — Remove Premium from a server (developer only)\n"
+                        f"`{p}premium list` — List Premium servers (developer only)\n"
+                        f"`{p}adm add <user ID|@user>` — Grant bot-admin/Premium-bypass access (developer only)\n"
+                        f"`{p}adm remove <user ID|@user>` — Remove bot-admin/Premium-bypass access (developer only)\n"
+                        f"`{p}admlist` — View the bot-admin list\n\n"
+                        "Use IDs when a user mention cannot be resolved. Only authorized staff can run these commands."),
+            "prefix": ("🔑 No-Prefix Access",
+                       f"`{p}np <user ID|@user>` — Allow no-prefix commands in this server\n"
+                       f"`{p}npremove <user ID|@user>` — Remove this server's no-prefix access\n"
+                       f"`{p}gnp <user ID|@user>` — Allow no-prefix commands globally\n"
+                       f"`{p}gnpremove <user ID|@user>` — Remove global no-prefix access\n\n"
+                       "Grant access only to trusted users. Global access applies across servers where the bot is present."),
+            "admin": ("⚙️ Bot Administration",
+                      f"`{p}adminlist` — View registered global bot staff\n"
+                      f"`/adminlist` — Slash-command version, when synced and available\n"
+                      f"`{p}generatelink <server_id>` — Generate an invite for a server the bot has joined\n"
+                      f"`{p}serverlists` — List servers the bot has joined\n\n"
+                      "Some operations may be developer-only or require the bot to have the appropriate permissions."),
+        }
+        title, description = pages.get(category, pages["home"])
+        self.embed = StyledEmbed(title=title, description=description,
+                                 color=discord.Color.from_rgb(35, 0, 55),
+                                 timestamp=discord.utils.utcnow())
+        if bot.user:
+            self.embed.set_thumbnail(url=bot.user.display_avatar.url)
+            self.embed.set_footer(text="$pyX Security • Restricted Staff Help", icon_url=bot.user.display_avatar.url)
+        for item in self.children:
+            if isinstance(item, AdminHelpSelect):
+                for option in item.options:
+                    option.default = option.value == category
+
+
 @bot.command(name="admhelp", aliases=["adminhelp", "staffhelp"])
 async def admin_help_command(ctx):
-    """Show the restricted administrator and global-staff command guide."""
+    """Show the interactive restricted administrator and global-staff command guide."""
     if not is_global_staff(ctx.author):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Access Denied",
-            description="Staff only.",
+            description="This command is restricted to authorized bot staff.",
             color=discord.Color.red(),
+            timestamp=discord.utils.utcnow(),
         )
+        if bot.user:
+            embed.set_thumbnail(url=bot.user.display_avatar.url)
+            embed.set_footer(text="$pyX Security • Staff only")
         return await ctx.reply(embed=embed, mention_author=False)
 
-    purple = discord.Color.from_rgb(128, 0, 255)
-    embed = clean_embed(
-        title="✦ $pyX Security | Administrator Help",
-        description=(
-            "Restricted commands for managing Premium access, prefix access, and bot administration.\n"
-            "Use the command prefix configured for this server."
-        ),
-        color=purple,
-        timestamp=discord.utils.utcnow(),
-    )
-    embed.add_field(
-        name="💎 Premium Management",
-        value=(
-            "`!premium add [server_id]` — Enable Premium (developer only)\n"
-            "`!premium remove [server_id]` — Remove Premium (developer only)\n"
-            "`!premium list` — List Premium servers (developer only)\n"
-            "`!adm add @user` — Grant Premium-bypass access (developer only)\n"
-            "`!adm remove @user` — Remove Premium-bypass access (developer only)\n"
-            "`!admlist` — View the bot-admin list"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🛡️ Prefix Access Management",
-        value=(
-            "`!np @user` — Allow no-prefix commands in this server\n"
-            "`!npremove @user` — Remove this server's no-prefix access\n"
-            "`!gnp @user` — Allow no-prefix commands in every server\n"
-            "`!gnpremove @user` — Remove global no-prefix access"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="⚙️ Bot Administration",
-        value=(
-            "`!adminlist` — View registered global bot staff (slash command: `/adminlist`)\n"
-            "`!generatelink <server_id>` — Generate an invite for a server the bot has joined\n"
-            "`!serverlists` — List servers the bot has joined"
-        ),
-        inline=False,
-    )
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
-    if active_prefix != "!":
-        for field in embed.fields:
-            field.value = field.value.replace("!", active_prefix)
-    if bot.user:
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-    embed.set_footer(text="$pyX Security • Developed by spywxre")
-    await ctx.reply(embed=embed, mention_author=False)
-
+    view = AdminHelpView(ctx, active_prefix)
+    await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
 @bot.command(name="av", aliases=["avatar", "pfp"])
 @commands.guild_only()
@@ -1340,13 +1283,55 @@ async def avatar_command(ctx, user: discord.User = None):
         return
     target = user or ctx.author
     avatar_url = target.display_avatar.url
-    embed = clean_embed(
+    embed = StyledEmbed(
         title=f"✦ Avatar | {discord.utils.escape_markdown(target.name)}",
         description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size avatar]({avatar_url})",
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
     )
     embed.set_image(url=avatar_url)
+    embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+@bot.command(name="banner")
+@commands.guild_only()
+async def banner_command(ctx, user: discord.User = None):
+    """Show a user's Discord profile banner; Premium servers only."""
+    if not await require_premium(ctx):
+        return
+
+    target = user or ctx.author
+    try:
+        # Fetch the full user profile because cached users may not include banner data.
+        fetched_user = await ctx.bot.fetch_user(target.id)
+    except discord.NotFound:
+        await ctx.reply("That user could not be found.", mention_author=False)
+        return
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.reply("I couldn't retrieve that user's banner. Please try again.", mention_author=False)
+        return
+
+    banner_asset = fetched_user.banner
+    if banner_asset is None:
+        embed = StyledEmbed(
+            title=f"✦ Banner | {discord.utils.escape_markdown(target.name)}",
+            description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\nThis user does not have a profile banner set.",
+            color=discord.Color.from_rgb(128, 0, 255),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+        await ctx.reply(embed=embed, mention_author=False)
+        return
+
+    banner_url = banner_asset.url
+    embed = StyledEmbed(
+        title=f"✦ Banner | {discord.utils.escape_markdown(target.name)}",
+        description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size banner]({banner_url})",
+        color=discord.Color.from_rgb(128, 0, 255),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_image(url=banner_url)
     embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -1372,7 +1357,7 @@ async def server_info_command(ctx):
     tier = guild.premium_tier
     created_ts = int(guild.created_at.timestamp())
 
-    embed = clean_embed(
+    embed = StyledEmbed(
         title=f"{guild.name}",
         description=(
             f"Server information for **{guild.name}**\n"
@@ -1412,80 +1397,70 @@ async def server_info_command(ctx):
     await ctx.reply(embed=embed, mention_author=False)
 
 
+class BotInfoCategorySelect(discord.ui.Select):
+    def __init__(self, ctx):
+        self.ctx = ctx
+        options = [
+            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", emoji="🏠", default=True),
+            discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-raid, and whitelist", emoji="🛡️"),
+            discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls", emoji="🔨"),
+            discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization", emoji="💾"),
+            discord.SelectOption(label="Statistics", value="stats", description="Bot runtime statistics", emoji="📊"),
+        ]
+        super().__init__(placeholder="Select a category to explore commands…", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the person who ran the command can use this menu.", ephemeral=True)
+            return
+        self.view.update_embed(self.values[0])
+        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+
+
+class BotInfoView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.add_item(BotInfoCategorySelect(ctx))
+        self.embed = None
+        self.update_embed("home")
+
+    def update_embed(self, category):
+        bot_user = bot.user
+        labels = {
+            "home": ("$pyX Security", "Powerful Discord server protection and moderation.\n\n**Developed by:** spywxre\n**Made for:** Protection\n\nSelect a category from the dropdown menu below to explore my commands."),
+            "security": ("🛡️ Server Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
+            "moderation": ("🔨 Moderation & Controls", "• Kick and ban members\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
+            "backups": ("💾 Backups, Logs & Customization", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
+            "stats": ("📊 Bot Statistics", f"**Servers:** `{len(bot.guilds):,}`\n**Users:** `{sum(g.member_count or 0 for g in bot.guilds):,}` (approximate, summed across servers)\n**Commands:** `{len(bot.commands):,}` prefix commands\n**Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
+        }
+        title, description = labels.get(category, labels["home"])
+        self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
+        if bot_user:
+            self.embed.set_thumbnail(url=bot_user.display_avatar.url)
+            banner = getattr(bot_user, "banner", None)
+            if banner:
+                self.embed.set_image(url=banner.url)
+            self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
+        for item in self.children:
+            if isinstance(item, BotInfoCategorySelect):
+                for option in item.options:
+                    option.default = option.value == category
+
+
 @bot.command(name="info", aliases=["botinfo", "about"])
 async def bot_info_command(ctx):
-    purple = discord.Color.from_rgb(128, 0, 255)
-    bot_user = bot.user
-    if bot_user is None:
+    if bot.user is None:
         return await ctx.reply("Bot info is not available yet.", mention_author=False)
+    view = BotInfoView(ctx)
+    await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
-    embed = clean_embed(
-        title="$pyX Security | Bot Information",
-        description=(
-            "**Purpose**\n"
-            "$pyX Security is a Discord security and moderation bot designed to help server staff respond to raids, destructive actions, and everyday moderation needs.\n\n"
-            "**Developed by:** spywxre\n"
-            "**Built for:** Server protection and moderation"
-        ),
-        color=purple,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_thumbnail(url=bot_user.display_avatar.url)
-    embed.add_field(
-        name="🛡️ Server Security",
-        value=(
-            "• Anti-nuke monitoring with configurable thresholds and punishment\n"
-            "• Anti-raid join detection and optional lockdown\n"
-            "• Anti-spam detection, message deletion, and member timeout\n"
-            "• Anti-link filtering with an allowed-domain list\n"
-            "• Whitelist management and security status checks\n"
-            "• Security logs and owner notifications"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🔨 Moderation & Channel Controls",
-        value=(
-            "• Kick and ban members\n"
-            "• Assign or remove roles, including bulk role management\n"
-            "• Purge recent messages or accessible channel history\n"
-            "• Lock/unlock a channel or lock down/unlock the server\n"
-            "• View the latest deleted message with snipe\n"
-            "• AFK status and voice-channel join support"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="💾 Backups, Logs & Customization",
-        value=(
-            "• Create and restore server backups (Premium)\n"
-            "• Configure or disable security log channels\n"
-            "• View server information and member avatars (avatar lookup may require Premium)\n"
-            "• Change the bot's server-specific banner, profile picture, or nickname (Premium)\n"
-            "• Add custom emojis to a server (Premium)\n"
-            "• Configure the server command prefix (Premium)\n"
-            "• Use prefix and slash commands"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📊 Runtime Information",
-        value=(
-            f"**Servers:** {len(bot.guilds):,}\n"
-            f"**Bot ID:** `{bot_user.id}`"
-        ),
-        inline=True
-    )
-    embed.add_field(
-        name="⚠️ Note",
-        value="Protection depends on the bot's permissions, role hierarchy, enabled intents, and each server's configuration.",
-        inline=True
-    )
-    bot_banner = getattr(bot_user, "banner", None)
-    if bot_banner:
-        embed.set_image(url=bot_banner.url)
-    embed.set_footer(text="$pyX Security • Developed by spywxre", icon_url=bot_user.display_avatar.url)
-    await ctx.reply(embed=embed, mention_author=False)
+
+@bot.command(name="ping")
+async def ping_command(ctx):
+    latency_ms = round(bot.latency * 1000)
+    await ctx.reply(f"📶 latency is **{latency_ms} ms**!", mention_author=False)
+
 # ==================== SERVER-SPECIFIC BOT PROFILE ====================
 PROFILE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 PROFILE_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -1538,7 +1513,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
     if ctx.guild is None:
         return await ctx.reply("Use this command in a server.", mention_author=False)
     if not has_admin_access(ctx.author):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Permission Denied",
             description="Server admins only.",
             color=discord.Color.from_rgb(128, 0, 255),
@@ -1569,7 +1544,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
             label = "Server-specific profile banner"
         else:
             label = "Server-specific profile picture"
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Profile Updated",
             description=f"Updated the bot profile for **{ctx.guild.name}**.",
             color=discord.Color.from_rgb(128, 0, 255),
@@ -1579,7 +1554,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         embed.set_footer(text="$pyX Security • Developed by spywxre", icon_url=bot.user.display_avatar.url if bot.user else None)
         await ctx.reply(embed=embed, mention_author=False)
     except ValueError as exc:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Invalid Image",
             description=str(exc),
             color=discord.Color.from_rgb(128, 0, 255),
@@ -1595,7 +1570,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         await ctx.reply("I couldn't download that image. Check the URL and try again.", mention_author=False)
     except discord.HTTPException as exc:
         logger.warning("Discord rejected server-specific profile change: %r", exc)
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Profile Update Failed",
             description=(
                 "Discord rejected the profile change. Check that the image is supported and that Discord "
@@ -1624,80 +1599,16 @@ async def change_bot_server_avatar(ctx, *, image_url: str = None):
 
 _CUSTOM_EMOJI_RE = re.compile(r"<(?P<animated>a?):(?P<name>[A-Za-z0-9_]{2,32}):(?P<id>\d+)>")
 
-# Prefix and slash !steal share one per-guild upload gate. This prevents two
-# simultaneous commands from racing into Discord's emoji-create rate limit.
-_EMOJI_UPLOAD_LOCKS = defaultdict(asyncio.Lock)
-_EMOJI_LAST_UPLOAD_AT = {}
-_EMOJI_COOLDOWN_UNTIL = {}
-_EMOJI_UPLOAD_SPACING_SECONDS = 4.0
-
-
-async def _create_emoji_safely(guild, *, name, image, reason):
-    """Serialize emoji creation per guild and honor any observed 429 cooldown."""
-    guild_id = guild.id
-    lock = _EMOJI_UPLOAD_LOCKS[guild_id]
-    async with lock:
-        now = time.monotonic()
-        cooldown_until = _EMOJI_COOLDOWN_UNTIL.get(guild_id, 0.0)
-        if cooldown_until > now:
-            raise RuntimeError(
-                f"Emoji uploads are cooling down for about {int(cooldown_until - now + 0.999)} seconds "
-                "because Discord rate-limited this server."
-            )
-
-        last_upload = _EMOJI_LAST_UPLOAD_AT.get(guild_id, 0.0)
-        wait_for = _EMOJI_UPLOAD_SPACING_SECONDS - (now - last_upload)
-        if wait_for > 0:
-            await asyncio.sleep(wait_for)
-
-        try:
-            created = await guild.create_custom_emoji(
-                name=name, image=image, reason=reason
-            )
-        except discord.HTTPException as exc:
-            if getattr(exc, "status", None) == 429:
-                retry_after = None
-                response = getattr(exc, "response", None)
-                headers = getattr(response, "headers", {}) or {}
-                try:
-                    retry_after = float(headers.get("Retry-After", ""))
-                except (TypeError, ValueError):
-                    pass
-                # Don't guess a short retry interval: if Discord supplies one,
-                # preserve it; otherwise apply a conservative 60-second cooldown.
-                _EMOJI_COOLDOWN_UNTIL[guild_id] = time.monotonic() + max(retry_after or 60.0, 1.0)
-            raise
-        else:
-            _EMOJI_LAST_UPLOAD_AT[guild_id] = time.monotonic()
-            return created
-
 @bot.command(name="steal", aliases=["emojiadd", "copyemoji"])
 @commands.guild_only()
 async def steal_custom_emoji(ctx, *, arguments: str = ""):
+    if not await require_premium(ctx):
+        return
     """Copy accessible custom emoji(s) into this server; source emojis are not removed."""
     purple = discord.Color.from_rgb(128, 0, 255)
 
-    # Allow the server owner, Discord administrators, authorized $pyX bot
-    # staff/developers, and members with Manage Expressions permission.
-    member_perms = ctx.author.guild_permissions
-    can_manage_expressions = (
-        getattr(member_perms, "manage_emojis_and_stickers", False)
-        or getattr(member_perms, "manage_expressions", False)
-    )
-    if not (has_admin_access(ctx.author) or can_manage_expressions):
-        embed = clean_embed(
-            title="✦ $pyX Security | Permission Denied",
-            description=(
-                "You need **Manage Expressions** or must be this server's **owner**, "
-                "a member with **Administrator**, or an authorized **$pyX bot admin/developer** "
-                "to use `!steal`."
-            ),
-            color=purple,
-        )
-        return await ctx.reply(embed=embed, mention_author=False)
-
     if not arguments.strip():
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Steal Emoji",
             description=(
                 "Mention a custom emoji from another server.\n"
@@ -1709,6 +1620,20 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
         )
         return await ctx.reply(embed=embed, mention_author=False)
 
+    member_perms = ctx.author.guild_permissions
+    can_manage = (
+        has_admin_access(ctx.author)
+        or getattr(member_perms, "manage_emojis_and_stickers", False)
+        or getattr(member_perms, "manage_expressions", False)
+    )
+    if not can_manage:
+        embed = StyledEmbed(
+            title="✦ $pyX Security | Permission Denied",
+            description="You need Manage Expressions permission.",
+            color=purple,
+        )
+        return await ctx.reply(embed=embed, mention_author=False)
+
     bot_member = ctx.guild.me
     bot_perms = bot_member.guild_permissions if bot_member else None
     bot_can_manage = bot_perms and (
@@ -1716,7 +1641,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
         or getattr(bot_perms, "manage_expressions", False)
     )
     if not bot_can_manage:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Missing Permission",
             description="I need Manage Expressions permission.",
             color=purple,
@@ -1725,7 +1650,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
 
     matches = list(_CUSTOM_EMOJI_RE.finditer(arguments))
     if not matches:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | No Custom Emoji Found",
             description=(
                 "Mention a custom Discord emoji to copy it."
@@ -1757,56 +1682,29 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
         for match in unique_matches:
             emoji_id = match.group("id")
             original_name = match.group("name")
-            # The <a:...> marker normally identifies animation, but don't rely on
-            # it exclusively: try the GIF CDN asset and inspect its actual bytes.
-            marked_animated = bool(match.group("animated"))
+            animated = bool(match.group("animated"))
+            extension = "gif" if animated else "png"
+            emoji_url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{extension}?quality=lossless"
             emoji_name = requested_name if len(unique_matches) == 1 and requested_name else original_name
             emoji_name = re.sub(r"[^A-Za-z0-9_]", "_", emoji_name).strip("_")[:32]
             if len(emoji_name) < 2:
                 emoji_name = "copied_emoji"
 
             try:
-                image_data = None
-                detected_animated = False
-                download_status = None
-                # Animated source first; if it isn't a GIF, fall back to PNG only
-                # when the input wasn't explicitly marked as animated.
-                extensions = ("gif", "png")
-                for extension in extensions:
-                    emoji_url = f"https://cdn.discordapp.com/emojis/{emoji_id}.{extension}?quality=lossless"
-                    async with session.get(emoji_url, allow_redirects=True) as response:
-                        download_status = response.status
-                        if response.status != 200:
-                            continue
-                        candidate = await response.content.read(10 * 1024 * 1024 + 1)
-                        if not candidate:
-                            continue
-                        if len(candidate) > 10 * 1024 * 1024:
-                            failures.append(f"`{original_name}` — file is larger than the 10 MB download safety limit.")
-                            image_data = None
-                            break
-                        is_gif = candidate.startswith((b"GIF87a", b"GIF89a"))
-                        is_png = candidate.startswith(b"\x89PNG\r\n\x1a\n")
-                        if extension == "gif" and is_gif:
-                            image_data = candidate
-                            detected_animated = True
-                            break
-                        if extension == "png" and is_png:
-                            image_data = candidate
-                            detected_animated = False
-                            break
+                async with session.get(emoji_url, allow_redirects=True) as response:
+                    if response.status != 200:
+                        failures.append(f"`{original_name}` — source image unavailable (HTTP {response.status}).")
+                        continue
+                    content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                    if not content_type.startswith("image/"):
+                        failures.append(f"`{original_name}` — Discord CDN did not return an image.")
+                        continue
+                    image_data = await response.content.read(10 * 1024 * 1024 + 1)
+                    if not image_data or len(image_data) > 10 * 1024 * 1024:
+                        failures.append(f"`{original_name}` — image was empty or larger than 10 MB.")
+                        continue
 
-                if not image_data:
-                    if not any(f"`{original_name}`" in item and "10 MB" in item for item in failures):
-                        if marked_animated:
-                            failures.append(f"`{original_name}` — animated GIF unavailable from Discord's CDN (HTTP {download_status}).")
-                        else:
-                            failures.append(f"`{original_name}` — source emoji image unavailable or unsupported (HTTP {download_status}).")
-                    continue
-
-                # Keep a clear failure if Discord rejects the actual GIF/PNG upload.
-                created = await _create_emoji_safely(
-                    ctx.guild,
+                created = await ctx.guild.create_custom_emoji(
                     name=emoji_name,
                     image=image_data,
                     reason=f"Emoji copied by {ctx.author} ({ctx.author.id}) using !steal",
@@ -1817,16 +1715,11 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
                 failures.append(f"`{original_name}` — download failed; try again.")
             except discord.Forbidden:
                 failures.append(f"`{original_name}` — Discord denied the upload. Check bot permissions and emoji capacity.")
-            except RuntimeError as exc:
-                failures.append(f"`{original_name}` — {str(exc)}")
             except discord.HTTPException as exc:
                 detail = getattr(exc, "text", None) or str(exc)
-                if getattr(exc, "status", None) == 429:
-                    failures.append(f"`{original_name}` — Discord rate-limited emoji uploads. Stop retrying and wait for Discord's cooldown to expire. ({detail[:120]})")
-                else:
-                    failures.append(f"`{original_name}` — Discord rejected it: {detail[:180]}")
+                failures.append(f"`{original_name}` — Discord rejected it: {detail[:180]}")
 
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Emoji Import Results",
         description=f"Copied **{len(success_names)}/{len(unique_matches)}** emoji(s).",
         color=purple,
@@ -1849,7 +1742,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
     purple = discord.Color.from_rgb(128, 0, 255)
 
     if not has_admin_access(ctx.author):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Permission Denied",
             description="Server admins only.",
             color=purple,
@@ -1860,7 +1753,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
     if bot_member is None:
         return await ctx.reply("I couldn't find my member profile in this server.", mention_author=False)
     if not bot_member.guild_permissions.change_nickname:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Missing Permission",
             description="I need Change Nickname permission.",
             color=purple,
@@ -1881,10 +1774,10 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         )
     except discord.Forbidden:
         description = "Nickname change failed. Check my permissions and role position."
-        embed = clean_embed(title="✦ $pyX Security | Nickname Change Failed", description=description, color=purple)
+        embed = StyledEmbed(title="✦ $pyX Security | Nickname Change Failed", description=description, color=purple)
         return await ctx.reply(embed=embed, mention_author=False)
     except discord.HTTPException as exc:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Nickname Change Failed",
             description="Could not update nickname. Check permissions.",
             color=purple,
@@ -1895,7 +1788,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         description = f"Reset my server nickname in **{ctx.guild.name}**. I'll use my default bot name here."
     else:
         description = f"My server nickname in **{ctx.guild.name}** is now **{discord.utils.escape_markdown(new_nickname)}**."
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Nickname Updated",
         description=description,
         color=purple,
@@ -1913,7 +1806,7 @@ async def purge_command(ctx, target: str = None, amount: int = None):
     purple = discord.Color.from_rgb(128, 0, 255)
 
     async def purge_embed(title, description, *, color=purple, delete_after=10):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title=f"$pyX Security | {title}",
             description=description,
             color=color,
@@ -2029,7 +1922,7 @@ async def purge_command(ctx, target: str = None, amount: int = None):
                     await old_message.delete()
                     deleted_count += 1
 
-        result = clean_embed(
+        result = StyledEmbed(
             title="$pyX Security | Purge Complete",
             description=f"Deleted **{deleted_count:,}** message(s). ({mode_text})",
             color=purple,
@@ -2067,7 +1960,7 @@ async def afk_command(ctx, *, message="AFK"):
         "message": afk_message,
         "since": discord.utils.utcnow()
     }
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="$pyX Security | AFK Enabled",
         description=(
             f"{ctx.author.mention} is now AFK: {discord.utils.escape_markdown(afk_message)}"
@@ -2077,6 +1970,29 @@ async def afk_command(ctx, *, message="AFK"):
     )
     embed.set_footer(text="$pyX Security")
     await ctx.reply(embed=embed, mention_author=False)
+# ==================== PREFIX / NO-PREFIX ACCESS HELPER ====================
+def has_no_prefix_access(message):
+    """Return True when the author is allowed to invoke commands without a prefix."""
+    if message.guild is None:
+        return False
+
+    user_id = message.author.id
+    global_values = config.get("global_no_prefix", [])
+    if not isinstance(global_values, (list, tuple, set)):
+        global_values = []
+    global_ids = {int(value) for value in global_values if str(value).isdigit()}
+
+    guild_mapping = config.get("guild_no_prefix", {})
+    if not isinstance(guild_mapping, dict):
+        guild_mapping = {}
+    guild_values = guild_mapping.get(str(message.guild.id), [])
+    if not isinstance(guild_values, (list, tuple, set)):
+        guild_values = []
+    guild_ids = {int(value) for value in guild_values if str(value).isdigit()}
+
+    return user_id in global_ids or user_id in guild_ids
+
+
 @bot.listen("on_message")
 async def afk_message_listener(message):
     if message.author.bot or message.guild is None:
@@ -2129,7 +2045,7 @@ async def afk_message_listener(message):
             duration = f"{minutes}m {seconds}s"
         else:
             duration = f"{seconds}s"
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | AFK Removed",
             description=(
                 f"Welcome back, {message.author.mention}!\n\n"
@@ -2159,7 +2075,7 @@ async def afk_message_listener(message):
         notified.add(mentioned_user.id)
         afk_data = afk_users[key]
         since = discord.utils.format_dt(afk_data["since"], style="R")
-        embed = clean_embed(
+        embed = StyledEmbed(
             title=f"$pyX Security | {mentioned_user.display_name} is AFK",
             description=(
                 f"**Message:** {discord.utils.escape_markdown(afk_data['message'])}\n"
@@ -2280,7 +2196,7 @@ async def unban_command(ctx, user_id: str):
 def role_embed(title, description, color=None):
     if color is None:
         color = discord.Color.from_rgb(128, 0, 255)
-    embed = clean_embed(
+    embed = StyledEmbed(
         title=f"$pyX Security | {title}",
         description=description,
         color=color,
@@ -2488,7 +2404,7 @@ async def security_command(ctx):
     guild_whitelist = config.get(
         "guild_whitelists", {}
     ).get(str(ctx.guild.id), [])
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="$pyX Security Status",
         color=discord.Color.green()
     )
@@ -2501,10 +2417,6 @@ async def security_command(ctx):
         value="Enabled" if config["raid_protection"] else "Disabled"
     )
     embed.add_field(
-        name="Anti-spam",
-        value="Enabled" if get_guild_setting(ctx.guild, "antispam_enabled", False) else "Disabled"
-    )
-    embed.add_field(
         name="Whitelisted users",
         value=str(len(guild_whitelist))
     )
@@ -2513,102 +2425,7 @@ async def security_command(ctx):
         value=str(len(bot.guilds))
     )
     await ctx.reply(embed=embed, mention_author=False)
-@bot.command(name="antispam")
-@commands.guild_only()
-async def antispam_command(ctx, mode: str = None, setting: str = None, value: str = None):
-    """Configure anti-spam independently for the current server."""
-    if not has_admin_access(ctx.author):
-        return await ctx.reply("Bot staff or server administrators only.", mention_author=False)
-    mode = (mode or "status").lower()
-    if mode in ("on", "enable", "enabled"):
-        set_guild_setting(ctx.guild, "antispam_enabled", True)
-        description = f"Anti-spam is now **ON** for **{ctx.guild.name}**."
-    elif mode in ("off", "disable", "disabled"):
-        set_guild_setting(ctx.guild, "antispam_enabled", False)
-        description = f"Anti-spam is now **OFF** for **{ctx.guild.name}**."
-    elif mode == "settings":
-        allowed = {"window": ("antispam_window_seconds", 1, 30), "messages": ("antispam_message_limit", 2, 20), "duplicates": ("antispam_duplicate_limit", 2, 20), "mentions": ("antispam_mention_limit", 1, 50), "timeout": ("antispam_timeout_seconds", 1, 2419200), "delete": ("antispam_delete_messages", None, None)}
-        if setting and setting.lower() in allowed and value is not None:
-            key, minimum, maximum = allowed[setting.lower()]
-            try:
-                parsed = value.lower() in ("true", "yes", "on", "1") if key.endswith("delete_messages") else int(value)
-                if minimum is not None and not minimum <= parsed <= maximum:
-                    raise ValueError
-                set_guild_setting(ctx.guild, key, parsed)
-                description = f"Updated this server's anti-spam setting **{setting}** to **{parsed}**."
-            except ValueError:
-                return await ctx.reply("Invalid value. Use window 1–30, messages/duplicates 2–20, mentions 1–50, timeout 1–2419200, or delete true/false.", mention_author=False)
-        else:
-            description = "Settings: `window 1-30`, `messages 2-20`, `duplicates 2-20`, `mentions 1-50`, `timeout 1-2419200`, `delete true/false`. Example: `antispam settings messages 4`."
-    elif mode != "status":
-        description = "Use `antispam on`, `antispam off`, `antispam status`, or `antispam settings <setting> <value>`."
-    else:
-        description = "Anti-spam status for this server."
-    enabled = bool(get_guild_setting(ctx.guild, "antispam_enabled", False))
-    embed = clean_embed(title="$pyX Security | Anti-Spam", description=description, color=discord.Color.from_rgb(35, 0, 55))
-    embed.add_field(name="Status", value="ON" if enabled else "OFF", inline=True)
-    embed.add_field(name="Messages / window", value=f"{get_guild_setting(ctx.guild, 'antispam_message_limit', 3)} / {get_guild_setting(ctx.guild, 'antispam_window_seconds', 4)}s", inline=True)
-    embed.add_field(name="Repeated messages", value=str(get_guild_setting(ctx.guild, "antispam_duplicate_limit", 3)), inline=True)
-    embed.add_field(name="Mention limit", value=str(get_guild_setting(ctx.guild, "antispam_mention_limit", 6)), inline=True)
-    embed.add_field(name="Timeout", value=f"{get_guild_setting(ctx.guild, 'antispam_timeout_seconds', 300)}s", inline=True)
-    await ctx.reply(embed=embed, mention_author=False)
 
-@bot.command(name="antilink")
-@commands.guild_only()
-async def antilink_command(ctx, mode: str = None, *, argument: str = None):
-    """Toggle per-server link filtering and manage allowed domains/exemptions."""
-    if not has_admin_access(ctx.author):
-        return await ctx.reply("Bot staff or server administrators only.", mention_author=False)
-    mode = (mode or "status").lower()
-    if mode in ("on", "enable", "enabled"):
-        set_guild_setting(ctx.guild, "antilink_enabled", True)
-        description = f"Anti-link is now **ON** for **{ctx.guild.name}**."
-    elif mode in ("off", "disable", "disabled"):
-        set_guild_setting(ctx.guild, "antilink_enabled", False)
-        description = f"Anti-link is now **OFF** for **{ctx.guild.name}**."
-    elif mode in ("allow", "whitelist-add") and argument:
-        domain = argument.lower().strip().replace("https://", "").replace("http://", "").split("/", 1)[0].removeprefix("www.")
-        if not re.fullmatch(r"[a-z0-9.-]+", domain):
-            return await ctx.reply("Enter a domain such as `example.com`.", mention_author=False)
-        settings = guild_security_settings(ctx.guild)
-        domains = settings.setdefault("antilink_whitelist", [])
-        if domain not in domains:
-            domains.append(domain)
-        save_config()
-        description = f"Allowed domain added: `{domain}`."
-    elif mode in ("deny", "whitelist-remove") and argument:
-        settings = guild_security_settings(ctx.guild)
-        domains = settings.setdefault("antilink_whitelist", [])
-        domain = argument.lower().strip().replace("https://", "").replace("http://", "").split("/", 1)[0].removeprefix("www.")
-        settings["antilink_whitelist"] = [d for d in domains if d.lower() != domain]
-        save_config()
-        description = f"Allowed domain removed: `{domain}`."
-    elif mode == "exempt" and argument:
-        try: user_id = int(argument.strip(" <@!>"))
-        except ValueError: return await ctx.reply("Mention a user or provide a user ID.", mention_author=False)
-        settings = guild_security_settings(ctx.guild)
-        ids = settings.setdefault("antilink_exempt_ids", [])
-        if user_id not in ids: ids.append(user_id)
-        save_config()
-        description = f"User `{user_id}` is exempt from anti-link in this server."
-    elif mode == "unexempt" and argument:
-        try: user_id = int(argument.strip(" <@!>"))
-        except ValueError: return await ctx.reply("Mention a user or provide a user ID.", mention_author=False)
-        settings = guild_security_settings(ctx.guild)
-        settings["antilink_exempt_ids"] = [x for x in settings.get("antilink_exempt_ids", []) if str(x) != str(user_id)]
-        save_config()
-        description = f"User `{user_id}` is no longer exempt from anti-link in this server."
-    elif mode == "status":
-        description = "Use `antilink on/off/status`, `antilink allow <domain>`, `antilink deny <domain>`, `antilink exempt @user`, or `antilink unexempt @user`."
-    else:
-        description = "Invalid option. Use `antilink on/off/status`, `allow <domain>`, `deny <domain>`, `exempt @user`, or `unexempt @user`."
-    settings = guild_security_settings(ctx.guild)
-    enabled = bool(settings.get("antilink_enabled", False))
-    domains = settings.get("antilink_whitelist", [])
-    embed = clean_embed(title="$pyX Security | Anti-Link", description=description, color=discord.Color.from_rgb(35, 0, 55))
-    embed.add_field(name="Status", value="ON" if enabled else "OFF", inline=True)
-    embed.add_field(name="Allowed domains", value=", ".join(f"`{d}`" for d in domains[:15]) or "None", inline=False)
-    await ctx.reply(embed=embed, mention_author=False)
 
 @bot.command(name="prefix")
 @commands.guild_only()
@@ -2620,7 +2437,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
     premium_admin_ids = config.get("premium_admin_ids", [DEVELOPER_ID])
 
     if not is_owner_id(ctx.author.id) and ctx.author.id not in premium_admin_ids and not is_premium_guild(ctx.guild):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | Premium Feature",
             description=(
                 "Custom prefixes require Premium."
@@ -2631,7 +2448,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
         return await ctx.reply(embed=embed, mention_author=False)
 
     if not has_admin_access(ctx.author) and not is_owner_id(ctx.author.id):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | Permission Denied",
             description="Administrator permission required.",
             color=purple
@@ -2640,7 +2457,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
         return await ctx.reply(embed=embed, mention_author=False)
 
     if new_prefix is None:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | Server Prefix",
             description=(
                 f"Prefix: `{current_prefix}`\nUsage: `{current_prefix}prefix <new_prefix>`"
@@ -2654,7 +2471,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
     if (not 1 <= len(new_prefix) <= 32
             or any(char.isspace() for char in new_prefix)
             or "\n" in new_prefix or "\r" in new_prefix):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | Invalid Prefix",
             description=(
                 "Use 1–32 characters with no spaces. Example: `!` or `$`."
@@ -2666,7 +2483,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
 
     config.setdefault("guild_prefixes", {})[guild_key] = new_prefix
     save_config()
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="$pyX Security | Prefix Updated",
         description=(
             f"Prefix changed to `{new_prefix}`. Use `{new_prefix}help`."
@@ -2684,7 +2501,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     """Allow only the developer and explicitly configured bot admins to manage Premium."""
     # This check intentionally ignores guild owner/admin permissions.
     if not is_bot_admin_id(ctx.author.id):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Access Denied",
             description="Only the bot developer and authorized bot admins can manage Premium.",
             color=discord.Color.red(),
@@ -2693,7 +2510,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
 
     action = (action or "help").lower()
     if action in ("help", "status"):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Premium Manager",
             description=(
                 "`!premium add [server_id]` — Enable Premium\n`!premium remove [server_id]` — Remove Premium\n`!premium list` — List Premium servers"
@@ -2703,13 +2520,24 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
         return await ctx.reply(embed=embed, mention_author=False)
 
     if action == "list":
-        ids = sorted(set(config.get("premium_guild_ids", config.get("premium_guilds", []))))
-        listing = "\n".join(f"• `{gid}`" for gid in ids) if ids else "No servers currently have Premium."
-        embed = clean_embed(
+        ids = sorted({int(value) for value in config.get("premium_guild_ids", config.get("premium_guilds", [])) if str(value).isdigit()})
+        if not ids:
+            listing = "No servers currently have Premium."
+        else:
+            rows = []
+            for gid in ids:
+                guild = bot.get_guild(gid)
+                server_name = guild.name if guild else "Server not found in bot cache"
+                rows.append(f"• **{discord.utils.escape_markdown(server_name)}**\n  Server ID: `{gid}`")
+            listing = "\n".join(rows)
+            if len(listing) > 3900:
+                listing = listing[:3850].rsplit("\n", 1)[0] + "\n… list shortened to fit Discord's embed limit."
+        embed = StyledEmbed(
             title="✦ $pyX Security | Premium Servers",
-            description=listing[:4000],
+            description=listing,
             color=discord.Color.from_rgb(128, 0, 255),
         )
+        embed.set_footer(text=f"$pyX Security • {len(ids)} Premium server(s)")
         return await ctx.reply(embed=embed, mention_author=False)
 
     if action not in ("add", "remove"):
@@ -2741,7 +2569,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     config["premium_guild_ids"] = sorted(premium_ids)
     config["premium_guilds"] = list(config["premium_guild_ids"])
     save_config()
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Premium Updated",
         description=message,
         color=discord.Color.from_rgb(128, 0, 255),
@@ -2755,7 +2583,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
 async def premium_admin_command(ctx, action: str = None, user: discord.User = None):
     """Manage bot-admin access; restricted strictly to the configured primary developer ID."""
     if ctx.author.id != DEVELOPER_ID:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Access Denied",
             description="Developer only.",
             color=discord.Color.red(),
@@ -2764,7 +2592,7 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
 
     action = (action or "help").lower()
     if action not in ("add", "remove") or user is None:
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Premium Admin Manager",
             description=(
                 "`!adm add @user` — Grant bot-admin access to restricted commands and Premium features\n"
@@ -2796,7 +2624,7 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
     # Pin the developer first, then retain the order in which other admins were added.
     config["premium_admin_ids"] = [owner_id] + [uid for uid in admin_ids if uid != owner_id]
     save_config()
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Admin List Updated",
         description=message,
         color=discord.Color.from_rgb(128, 0, 255),
@@ -2823,7 +2651,7 @@ async def _bot_admin_username_line(user_id: int, index: int = None) -> str:
 async def premium_admin_list_command(ctx):
     """Display account usernames and IDs for bot admins to authorized bot staff only."""
     if not is_global_staff(ctx.author):
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="✦ $pyX Security | Access Denied",
             description="This command is restricted to authorized bot staff.",
             color=discord.Color.red(),
@@ -2839,7 +2667,7 @@ async def premium_admin_list_command(ctx):
     regular_admins = ordered_ids[1:]
     purple = discord.Color.from_rgb(35, 0, 55)
 
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Staff List",
         description=(
             "Need help with Premium access? Contact the developer or an authorized staff member for support and assistance."
@@ -2894,7 +2722,7 @@ async def antinuke_command(ctx, mode: str = None):
 
     if mode not in ("on", "off"):
         enabled = bool(get_guild_setting(ctx.guild, "antinuke_enabled", config.get("antinuke_enabled", True)))
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | Anti-Nuke",
             description=(
                 f"Anti-nuke protection is currently **{'ON' if enabled else 'OFF'}**.\n\n"
@@ -2908,7 +2736,7 @@ async def antinuke_command(ctx, mode: str = None):
     enabled = mode == "on"
     set_guild_setting(ctx.guild, "antinuke_enabled", enabled)
 
-    embed = clean_embed(
+    embed = StyledEmbed(
         title=f"$pyX Security | Anti-Nuke {'Enabled' if enabled else 'Disabled'}",
         description=(
             f"🛡️ Anti-nuke protection has been **{'ENABLED' if enabled else 'DISABLED'}** "
@@ -2985,7 +2813,7 @@ async def whitelist_list(ctx):
     user_ids = config.get("guild_whitelists", {}).get(
         str(ctx.guild.id), []
     )
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="$pyX Security | Whitelist",
         description=f"Whitelisted members in **{ctx.guild.name}**",
         color=discord.Color.from_rgb(128, 0, 255)
@@ -3023,7 +2851,7 @@ BACKUP_DIR = "backups"
 
 
 def feature_embed(title, description, *, color=PURPLE):
-    embed = clean_embed(title=f"✦ $pyX Security | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
+    embed = StyledEmbed(title=f"✦ $pyX Security | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
     embed.set_footer(text="$pyX Security")
     return embed
 
@@ -3477,6 +3305,14 @@ async def join_voice_command(ctx):
 async def on_message_delete(message):
     if message.guild is None or message.author.bot:
         return
+    content = (message.content or "[No text content]").strip()
+    await send_log(
+        message.guild,
+        "🗑️ Message Deleted",
+        f"**User:** {message.author.mention} (`{message.author.id}`)\n"
+        f"**Channel:** {message.channel.mention}\n**Content:**\n{content[:2500]}",
+        discord.Color.red()
+    )
     recent_deleted_messages[(message.guild.id, message.channel.id)] = {
         "author_id": message.author.id, "author_name": str(message.author),
         "content": message.content or "[No text content]", "created_at": message.created_at.isoformat(),
@@ -3582,7 +3418,7 @@ antinuke_group = app_commands.Group(
     description="Show anti-nuke status"
 )
 async def slash_antinuke_status(interaction: discord.Interaction):
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="$pyX Security Status",
         color=discord.Color.blurple()
     )
@@ -3593,10 +3429,6 @@ async def slash_antinuke_status(interaction: discord.Interaction):
     embed.add_field(
         name="Raid protection",
         value="ON" if config["raid_protection"] else "OFF"
-    )
-    embed.add_field(
-        name="Anti-spam",
-        value="Per-server setting"
     )
     embed.add_field(name="Servers", value=str(len(bot.guilds)))
     await interaction.response.send_message(
@@ -3647,113 +3479,24 @@ bot.tree.add_command(antinuke_group)
 async def slash_status(interaction: discord.Interaction):
     guild = interaction.guild
     antinuke_state = get_guild_setting(guild, "antinuke_enabled", config.get("antinuke_enabled", True)) if guild else config.get("antinuke_enabled", True)
-    antispam_state = get_guild_setting(guild, "antispam_enabled", False) if guild else False
-    antilink_state = get_guild_setting(guild, "antilink_enabled", False) if guild else False
     await interaction.response.send_message(
         f"**$pyX online**\n"
         f"Servers protected: `{len(bot.guilds)}`\n"
-        f"Anti-nuke: `{'ON' if antinuke_state else 'OFF'}`\n"
-        f"Anti-spam: `{'ON' if antispam_state else 'OFF'}`\n"
-        f"Anti-link: `{'ON' if antilink_state else 'OFF'}`",
+        f"Anti-nuke: `{'ON' if antinuke_state else 'OFF'}`",
         ephemeral=True
     )
-# ==================== PER-SERVER ANTI-SPAM / ANTI-LINK SLASH COMMANDS ====================
-antispam_group = app_commands.Group(name="antispam", description="Configure anti-spam for this server")
 
-@antispam_group.command(name="enable", description="Enable anti-spam for this server")
-async def slash_antispam_enable(interaction: discord.Interaction):
-    if interaction.guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    set_guild_setting(interaction.guild, "antispam_enabled", True)
-    await interaction.response.send_message(embed=role_embed("Anti-Spam Enabled", f"Anti-spam is now ON for **{interaction.guild.name}**."), ephemeral=True)
 
-@antispam_group.command(name="disable", description="Disable anti-spam for this server")
-async def slash_antispam_disable(interaction: discord.Interaction):
-    if interaction.guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    set_guild_setting(interaction.guild, "antispam_enabled", False)
-    await interaction.response.send_message(embed=role_embed("Anti-Spam Disabled", f"Anti-spam is now OFF for **{interaction.guild.name}**."), ephemeral=True)
 
-@antispam_group.command(name="status", description="Show this server's anti-spam settings")
-async def slash_antispam_status(interaction: discord.Interaction):
-    guild = interaction.guild
-    if guild is None:
-        return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-    enabled = bool(get_guild_setting(guild, "antispam_enabled", False))
-    embed = role_embed("Anti-Spam Status", f"Status: **{'ON' if enabled else 'OFF'}**\nMessages/window: `{get_guild_setting(guild, 'antispam_message_limit', 3)}` / `{get_guild_setting(guild, 'antispam_window_seconds', 4)}s`\nDuplicate threshold: `{get_guild_setting(guild, 'antispam_duplicate_limit', 3)}`\nMention threshold: `{get_guild_setting(guild, 'antispam_mention_limit', 6)}`\nTimeout: `{get_guild_setting(guild, 'antispam_timeout_seconds', 300)}s`")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@antispam_group.command(name="settings", description="Change this server's anti-spam thresholds")
-@app_commands.describe(messages="Messages in the window (2-20)", window="Window in seconds (1-30)", duplicates="Repeated message threshold (2-20)", mentions="Mention threshold (1-50)", timeout="Timeout duration in seconds")
-async def slash_antispam_settings(interaction: discord.Interaction, messages: app_commands.Range[int, 2, 20] = None, window: app_commands.Range[int, 1, 30] = None, duplicates: app_commands.Range[int, 2, 20] = None, mentions: app_commands.Range[int, 1, 50] = None, timeout: app_commands.Range[int, 1, 2419200] = None):
-    guild = interaction.guild
-    if guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    updates = {"antispam_message_limit": messages, "antispam_window_seconds": window, "antispam_duplicate_limit": duplicates, "antispam_mention_limit": mentions, "antispam_timeout_seconds": timeout}
-    changed = []
-    for key, value in updates.items():
-        if value is not None:
-            set_guild_setting(guild, key, value)
-            changed.append(f"`{key.removeprefix('antispam_')}` = `{value}`")
-    if not changed:
-        return await interaction.response.send_message("Provide at least one setting to update.", ephemeral=True)
-    await interaction.response.send_message(embed=role_embed("Anti-Spam Settings Updated", "\n".join(changed)), ephemeral=True)
 
-bot.tree.add_command(antispam_group)
 
-antilink_group = app_commands.Group(name="antilink", description="Configure anti-link for this server")
 
-@antilink_group.command(name="enable", description="Enable anti-link in this server")
-async def slash_antilink_enable(interaction: discord.Interaction):
-    if interaction.guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    set_guild_setting(interaction.guild, "antilink_enabled", True)
-    await interaction.response.send_message(embed=role_embed("Anti-Link Enabled", "Links are now blocked in this server unless their domain is allowed."), ephemeral=True)
 
-@antilink_group.command(name="disable", description="Disable anti-link in this server")
-async def slash_antilink_disable(interaction: discord.Interaction):
-    if interaction.guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    set_guild_setting(interaction.guild, "antilink_enabled", False)
-    await interaction.response.send_message(embed=role_embed("Anti-Link Disabled", "Links are no longer filtered in this server."), ephemeral=True)
 
-@antilink_group.command(name="status", description="Show this server's anti-link settings")
-async def slash_antilink_status(interaction: discord.Interaction):
-    guild = interaction.guild
-    if guild is None:
-        return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-    settings = guild_security_settings(guild)
-    domains = settings.get("antilink_whitelist", [])
-    await interaction.response.send_message(embed=role_embed("Anti-Link Status", f"Status: **{'ON' if settings.get('antilink_enabled', False) else 'OFF'}**\nAllowed domains: {', '.join(domains) if domains else 'None'}"), ephemeral=True)
 
-@antilink_group.command(name="allow-domain", description="Allow a domain in this server")
-@app_commands.describe(domain="Domain to allow, such as example.com")
-async def slash_antilink_allow(interaction: discord.Interaction, domain: str):
-    guild = interaction.guild
-    if guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    domain = domain.lower().strip().replace("https://", "").replace("http://", "").split("/", 1)[0].removeprefix("www.")
-    if not re.fullmatch(r"[a-z0-9.-]+", domain):
-        return await interaction.response.send_message("Invalid domain. Example: `example.com`", ephemeral=True)
-    settings = guild_security_settings(guild)
-    domains = settings.setdefault("antilink_whitelist", [])
-    if domain not in domains: domains.append(domain)
-    save_config()
-    await interaction.response.send_message(f"Allowed `{domain}` in this server.", ephemeral=True)
 
-@antilink_group.command(name="remove-domain", description="Remove an allowed domain")
-@app_commands.describe(domain="Domain to remove from the allowlist")
-async def slash_antilink_remove(interaction: discord.Interaction, domain: str):
-    guild = interaction.guild
-    if guild is None or not has_admin_access(interaction.user):
-        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
-    domain = domain.lower().strip().replace("https://", "").replace("http://", "").split("/", 1)[0].removeprefix("www.")
-    settings = guild_security_settings(guild)
-    settings["antilink_whitelist"] = [d for d in settings.get("antilink_whitelist", []) if d.lower() != domain]
-    save_config()
-    await interaction.response.send_message(f"Removed `{domain}` from the allowlist.", ephemeral=True)
 
-bot.tree.add_command(antilink_group)
 
 @bot.tree.command(name="roleall", description="Assign a role to eligible members")
 @app_commands.check(app_bot_staff_or_server_admin)
@@ -3952,7 +3695,7 @@ async def slash_whitelist(
     user_ids = guild_whitelists.get(guild_key, [])
     # LIST
     if action.value == "list":
-        embed = clean_embed(
+        embed = StyledEmbed(
             title="$pyX Security | Whitelist",
             description=f"Whitelisted members in **{guild.name}**",
             color=discord.Color.from_rgb(128, 0, 255)
@@ -4026,7 +3769,7 @@ async def slash_whitelist(
 @bot.tree.command(name="commands", description="List the available $pyX Security slash commands")
 async def slash_commands(interaction: discord.Interaction):
     description = (
-        "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`, `/antispam enable`, `/antispam disable`, `/antispam status`, `/antispam settings`, `/antilink enable`, `/antilink disable`, `/antilink status`, `/antilink allow-domain`, `/antilink remove-domain`\n\n"
+        "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`\n\n"
         "**Moderation:** `/kick`, `/ban`, `/unban`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`, `/lockdown`, `/unlockdown`\n\n"
         "**Utilities:** `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/help`\n\n"
         "**Bot staff:** `/premium`, `/np`, `/npremove`, `/gnp`, `/gnpremove`, `/generatelink`, `/serverlists`\n\n"
@@ -4040,9 +3783,7 @@ async def slash_security(interaction: discord.Interaction):
     if guild is None:
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
     embed = feature_embed("$pyX Security | Server Protection",
-        f"Anti-nuke: **{'ON' if get_guild_setting(guild, 'antinuke_enabled', config.get('antinuke_enabled', True)) else 'OFF'}**\n"
-        f"Anti-spam: **{'ON' if get_guild_setting(guild, 'antispam_enabled', False) else 'OFF'}**\n"
-        f"Anti-link: **{'ON' if get_guild_setting(guild, 'antilink_enabled', False) else 'OFF'}**")
+        f"Anti-nuke: **{'ON' if get_guild_setting(guild, 'antinuke_enabled', config.get('antinuke_enabled', True)) else 'OFF'}**")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="afk", description="Set your AFK status")
@@ -4211,8 +3952,6 @@ async def slash_info(interaction: discord.Interaction):
         value=(
             "• Anti-nuke monitoring and configurable punishment\n"
             "• Anti-raid join detection and optional lockdown\n"
-            "• Anti-spam detection, deletion, and timeout\n"
-            "• Anti-link filtering and allowed-domain list\n"
             "• Whitelist management, security status, and security logs\n"
             "• Owner notifications"
         ),
@@ -4307,7 +4046,7 @@ async def slash_admlist(interaction: discord.Interaction):
     ))
     ordered_ids = [owner_id] + [uid for uid in admin_ids if uid != owner_id]
     purple = discord.Color.from_rgb(35, 0, 55)
-    embed = clean_embed(
+    embed = StyledEmbed(
         title="✦ $pyX Security | Staff List",
         description="Need help with Premium access? Contact the developer or an authorized staff member for support and assistance.",
         color=purple,
@@ -4347,7 +4086,17 @@ async def slash_premium(interaction: discord.Interaction, action: app_commands.C
         )
     current = set(int(x) for x in config.get("premium_guild_ids", config.get("premium_guilds", [])) if str(x).isdigit())
     if action.value == "list":
-        text_value = "\n".join(f"• `{gid}`" for gid in sorted(current)) or "No Premium servers."
+        if not current:
+            text_value = "No servers currently have Premium."
+        else:
+            rows = []
+            for gid in sorted(current):
+                guild = bot.get_guild(gid)
+                server_name = guild.name if guild else "Server not found in bot cache"
+                rows.append(f"• **{discord.utils.escape_markdown(server_name)}**\n  Server ID: `{gid}`")
+            text_value = "\n".join(rows)
+            if len(text_value) > 3900:
+                text_value = text_value[:3850].rsplit("\n", 1)[0] + "\n… list shortened to fit Discord's embed limit."
     else:
         if not server_id or not server_id.isdigit():
             return await interaction.response.send_message("Provide a valid server ID.", ephemeral=True)
@@ -4429,7 +4178,13 @@ async def slash_generatelink(interaction: discord.Interaction, server_id: str):
 # Slash equivalents for remaining high-use prefix utilities.
 @bot.tree.command(name="help", description="Show the command guide")
 async def slash_help(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | Command Guide", "Use `/commands` for the slash command index. Security controls: `/antinuke`, `/antispam`, `/antilink`. Moderation: `/kick`, `/ban`, `/unban`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`, `/lockdown`, `/unlockdown`. Utilities: `/afk`, `/snipe`, `/security`, `/serverinfo`, `/info`, `/avatar`, `/prefix`."), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed(
+        "$pyX Security | Command Guide",
+        "Use `/commands` for the slash command index.\n\n"
+        "**Server Protection:** `/antinuke`, `/security`, `/lockdown`, `/unlockdown`, `!antispam on/off/status`, `!antispam settings <setting> <value>`, `!antilink on/off/status`, `!antilink allow <domain>`, `!antilink deny <domain>`, `!antilink exempt @member`.\n"
+        "**Moderation:** `/kick`, `/ban`, `/unban`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`.\n"
+        "**Utilities:** `/afk`, `/snipe`, `/serverinfo`, `/info`, `/avatar`, `/prefix`."
+    ), ephemeral=True)
 
 @bot.tree.command(name="admhelp", description="Show restricted bot-staff commands")
 async def slash_admhelp(interaction: discord.Interaction):
@@ -4526,24 +4281,9 @@ async def slash_steal(interaction: discord.Interaction, emoji: str, name: str = 
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
     if not (is_owner_id(interaction.user.id) or interaction.user.id in config.get("premium_admin_ids", []) or is_premium_guild(guild)):
         return await interaction.response.send_message("This is a Premium feature.", ephemeral=True)
-    user_perms = getattr(interaction.user, "guild_permissions", None)
-    can_manage_expressions = bool(
-        user_perms and (
-            getattr(user_perms, "manage_emojis_and_stickers", False)
-            or getattr(user_perms, "manage_expressions", False)
-        )
-    )
-    if not (has_admin_access(interaction.user) or can_manage_expressions):
-        return await interaction.response.send_message(
-            "You need Manage Expressions, Administrator, server-owner, or authorized $pyX staff access.",
-            ephemeral=True,
-        )
-    bot_member = guild.me
-    bot_perms = bot_member.guild_permissions if bot_member else None
-    if not (bot_perms and (
-        getattr(bot_perms, "manage_emojis_and_stickers", False)
-        or getattr(bot_perms, "manage_expressions", False)
-    )):
+    if not has_admin_access(interaction.user):
+        return await interaction.response.send_message("Bot staff or server administrators only.", ephemeral=True)
+    if not guild.me.guild_permissions.manage_emojis_and_stickers:
         return await interaction.response.send_message("I need Manage Expressions permission.", ephemeral=True)
     match = _CUSTOM_EMOJI_RE.search(emoji)
     if not match:
@@ -4554,104 +4294,333 @@ async def slash_steal(interaction: discord.Interaction, emoji: str, name: str = 
         new_name = "copied_emoji"
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        data = None
-        detected_gif = False
-        download_status = None
-        # Try GIF first even if the mention marker is missing/inaccurate, then PNG.
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=5)) as session:
-            for ext in ("gif", "png"):
-                async with session.get(
-                    f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}?quality=lossless",
-                    allow_redirects=True,
-                ) as response:
-                    download_status = response.status
-                    if response.status != 200:
-                        continue
-                    candidate = await response.content.read(10 * 1024 * 1024 + 1)
-                    if not candidate or len(candidate) > 10 * 1024 * 1024:
-                        continue
-                    if ext == "gif" and candidate.startswith((b"GIF87a", b"GIF89a")):
-                        data, detected_gif = candidate, True
-                        break
-                    if ext == "png" and candidate.startswith(b"\x89PNG\r\n\x1a\n"):
-                        data = candidate
-                        break
-        if not data:
-            return await interaction.followup.send(
-                f"Source emoji image could not be downloaded or was unsupported (HTTP {download_status}).",
-                ephemeral=True,
-            )
-        created = await _create_emoji_safely(
-            guild,
-            name=new_name,
-            image=data,
-            reason=f"Emoji copied by {interaction.user} ({interaction.user.id}) using /steal",
-        )
-        kind = "animated GIF" if detected_gif else "image"
-        await interaction.followup.send(embed=feature_embed("$pyX Security | Emoji Added", f"Added {created} as `{created.name}` ({kind})."), ephemeral=True)
-    except RuntimeError as exc:
-        await interaction.followup.send(str(exc), ephemeral=True)
+        ext = "gif" if animated else "png"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15, connect=5)) as session:
+            async with session.get(f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}?quality=lossless") as response:
+                if response.status != 200:
+                    return await interaction.followup.send("Source emoji image could not be downloaded.", ephemeral=True)
+                data = await response.content.read(10 * 1024 * 1024 + 1)
+        if not data or len(data) > 10 * 1024 * 1024:
+            return await interaction.followup.send("Emoji image is empty or exceeds 10 MB.", ephemeral=True)
+        created = await guild.create_custom_emoji(name=new_name, image=data, reason=f"Emoji copied by {interaction.user} ({interaction.user.id})")
+        await interaction.followup.send(embed=feature_embed("$pyX Security | Emoji Added", f"Added {created} as `{created.name}`."), ephemeral=True)
     except (aiohttp.ClientError, asyncio.TimeoutError, discord.HTTPException) as exc:
-        if isinstance(exc, discord.HTTPException) and getattr(exc, "status", None) == 429:
-            detail = "Discord rate-limited emoji uploads. Stop retrying and wait for the cooldown to expire."
-        else:
-            detail = f"Could not add the emoji. Check permissions, emoji capacity, and source format. {str(exc)[:250]}"
-        await interaction.followup.send(detail, ephemeral=True)
+        await interaction.followup.send(f"Could not add the emoji. Check permissions and emoji capacity. {str(exc)[:300]}", ephemeral=True)
 
-# ==================== PREFIX / NO-PREFIX COMMAND DISPATCH ====================
-def has_no_prefix_access(message):
-    """Whether this user may invoke registered commands without a prefix."""
-    if message.guild is None:
-        return False
-    user_id = message.author.id
-    global_ids = {
-        int(value) for value in config.get("global_no_prefix", [])
-        if str(value).isdigit()
-    }
-    guild_values = config.get("guild_no_prefix", {}).get(str(message.guild.id), [])
-    guild_ids = {int(value) for value in guild_values if str(value).isdigit()}
-    return user_id in global_ids or user_id in guild_ids
+# ==================== ANTI-SPAM ENFORCEMENT ====================
+# Keep a short per-member message history and prevent repeated punishment.
+spam_message_history = defaultdict(deque)
+spam_action_cooldowns = {}
+
+@bot.listen("on_message")
+async def antispam_message_listener(message):
+    """Delete detected spam and timeout the sender when permissions allow."""
+    if message.guild is None or message.author.bot:
+        return
+    guild = message.guild
+    if not bool(get_guild_setting(guild, "antispam_enabled", False)):
+        return
+
+    member = message.author
+    if not isinstance(member, discord.Member):
+        member = guild.get_member(message.author.id)
+    if member is None:
+        return
+    # Anti-spam is evaluated independently of the anti-nuke whitelist.
+    # Whitelisted users can still be detected for spam; administrator exemptions
+    # remain controlled by antispam_exempt_admins below.
+    if member.id == guild.owner_id:
+        return
+    if config.get("antispam_exempt_admins", False) and member.guild_permissions.administrator:
+        return
+
+    now = time.monotonic()
+    # Fast-response defaults: trigger after 3 messages in a 4-second window.
+    # Cap legacy config thresholds at 3 so older config.json values do not keep
+    # the detector unnecessarily slow; lower configured values are respected.
+    window = max(1, min(30, int(get_guild_setting(guild, "antispam_window_seconds", 4))))
+    message_limit = max(2, min(20, int(get_guild_setting(guild, "antispam_message_limit", 3))))
+    duplicate_limit = max(2, min(20, int(get_guild_setting(guild, "antispam_duplicate_limit", 3))))
+    mention_limit = max(1, int(get_guild_setting(guild, "antispam_mention_limit", 6)))
+    timeout_seconds = max(1, int(get_guild_setting(guild, "antispam_timeout_seconds", 300)))
+
+    key = (guild.id, message.channel.id, member.id)
+    history = spam_message_history[key]
+    while history and now - history[0][0] > window:
+        history.popleft()
+    # Normalize whitespace and case so TESTING, testing, and extra spaces match.
+    normalized_content = " ".join((message.content or "").split()).casefold()
+    history.append((now, normalized_content, message))
+
+    duplicate_count = sum(
+        1 for _, content, _ in history
+        if normalized_content and content == normalized_content
+    )
+    mention_count = len(message.mentions) + len(message.role_mentions)
+    if message.mention_everyone:
+        mention_count = max(mention_count, mention_limit)
+
+    reason = None
+    if mention_count >= mention_limit:
+        reason = f"mention spam ({mention_count} mentions in one message)"
+    elif duplicate_count >= duplicate_limit:
+        reason = f"repeated-message spam ({duplicate_count} matching messages in {window}s)"
+    elif len(history) >= message_limit:
+        reason = f"rapid-message spam ({len(history)} messages in {window}s)"
+
+    if reason is None:
+        return
+
+    cooldown_key = (guild.id, member.id)
+    if now - spam_action_cooldowns.get(cooldown_key, 0) < 10:
+        return
+    spam_action_cooldowns[cooldown_key] = now
+    history_to_clean = list(history)
+    history.clear()
+
+    bot_member = guild.me
+    if bot_member is None:
+        logger.warning("Anti-spam: bot member unavailable in guild %s", guild.id)
+        return
+
+    deleted = 0
+
+    async def delete_spam_burst():
+        """Delete the burst efficiently, using Discord bulk-delete when possible."""
+        nonlocal deleted
+        if not bool(get_guild_setting(guild, "antispam_delete_messages", True)):
+            return
+        if not bot_member.guild_permissions.manage_messages:
+            logger.warning("Anti-spam detected in %s but bot lacks Manage Messages", guild.id)
+            return
+
+        candidates = []
+        seen_ids = set()
+        for _, _, spam_message in history_to_clean:
+            if spam_message.id not in seen_ids:
+                seen_ids.add(spam_message.id)
+                # Discord bulk deletion cannot include messages older than 14 days.
+                age = (discord.utils.utcnow() - spam_message.created_at).total_seconds()
+                if age < 14 * 24 * 60 * 60:
+                    candidates.append(spam_message)
+
+        if not candidates:
+            return
+        try:
+            if len(candidates) >= 2 and hasattr(message.channel, "delete_messages"):
+                await message.channel.delete_messages(candidates, reason="$pyX Security anti-spam cleanup")
+                deleted += len(candidates)
+            else:
+                await candidates[0].delete(reason="$pyX Security anti-spam cleanup")
+                deleted += 1
+        except discord.NotFound:
+            # Some messages may already have been deleted by a moderator/other bot.
+            pass
+        except discord.Forbidden:
+            logger.warning("Anti-spam could not delete messages in guild %s", guild.id)
+        except discord.HTTPException as error:
+            # Bulk deletion can fail if the batch contains an invalid/old message;
+            # fall back to individual deletes rather than abandoning cleanup.
+            logger.warning("Anti-spam bulk delete failed in guild %s: %s; falling back", guild.id, error)
+            for spam_message in candidates:
+                try:
+                    await spam_message.delete(reason="$pyX Security anti-spam cleanup")
+                    deleted += 1
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+
+    async def apply_timeout():
+        nonlocal timed_out
+        if not bot_member.guild_permissions.moderate_members:
+            logger.warning("Anti-spam detected in %s but bot lacks Moderate Members", guild.id)
+            return
+        if member.top_role >= bot_member.top_role:
+            logger.warning("Anti-spam cannot timeout %s: member role is above/equal to bot role", member.id)
+            return
+        try:
+            await member.timeout(
+                timedelta(seconds=timeout_seconds),
+                reason=f"$pyX Security anti-spam: {reason}"
+            )
+            timed_out = True
+        except (discord.Forbidden, discord.HTTPException) as error:
+            logger.warning("Anti-spam timeout failed for %s: %s", member.id, error)
+
+    # Start enforcement actions together so message cleanup does not delay timeout.
+    timed_out = False
+    await asyncio.gather(delete_spam_burst(), apply_timeout())
+
+    status = (
+        f"**Member:** {member.mention} (`{member.id}`)\n"
+        f"**Detection:** {reason}\n"
+        f"**Messages deleted:** {deleted}\n"
+        f"**Timeout:** {'applied for ' + str(timeout_seconds) + ' seconds' if timed_out else 'not applied; check bot permissions and role hierarchy'}"
+    )
+    await send_log(guild, "Anti-Spam Action", status, discord.Color.orange())
+    logger.warning("Anti-spam action in guild %s for member %s: %s; deleted=%s; timeout=%s", guild.id, member.id, reason, deleted, timed_out)
+
+@bot.listen("on_message")
+async def antilink_message_listener(message):
+    """Delete links in servers that have independently enabled anti-link."""
+    guild = message.guild
+    if guild is None or message.author.bot or not bool(get_guild_setting(guild, "antilink_enabled", False)):
+        return
+    if is_link_exempt(message):
+        return
+    domains = extract_domains(message.content or "")
+    if not domains:
+        return
+    allowed = guild_security_settings(guild).get("antilink_whitelist", [])
+    blocked = [domain for domain in domains if not domain_is_allowed(domain, allowed)]
+    if not blocked:
+        return
+    try:
+        if guild.me and guild.me.guild_permissions.manage_messages:
+            await message.delete()  # PartialMessage.delete() does not accept a reason argument.
+        else:
+            logger.warning("Anti-link detected a link in guild %s but bot lacks Manage Messages", guild.id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+    try:
+        warning = await message.channel.send(f"{message.author.mention}, links are not allowed in this server.")
+        await asyncio.sleep(5)
+        await warning.delete()
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    await send_log(guild, "Anti-link triggered", f"Removed a link from {message.author.mention} in {message.channel.mention}. Blocked domain(s): {', '.join(blocked)}", discord.Color.orange())
+
+
+@bot.command(name="antispam")
+@commands.guild_only()
+async def antispam_command(ctx, mode: str = None, setting: str = None, value: str = None):
+    """Configure anti-spam independently for the current server."""
+    if not has_admin_access(ctx.author):
+        return await ctx.reply("Bot staff or server administrators only.", mention_author=False)
+    mode = (mode or "status").lower()
+    if mode in ("on", "enable", "enabled"):
+        set_guild_setting(ctx.guild, "antispam_enabled", True)
+        description = f"Anti-spam is now **ON** for **{ctx.guild.name}**."
+    elif mode in ("off", "disable", "disabled"):
+        set_guild_setting(ctx.guild, "antispam_enabled", False)
+        description = f"Anti-spam is now **OFF** for **{ctx.guild.name}**."
+    elif mode == "settings":
+        allowed = {"window": ("antispam_window_seconds", 1, 30), "messages": ("antispam_message_limit", 2, 20), "duplicates": ("antispam_duplicate_limit", 2, 20), "mentions": ("antispam_mention_limit", 1, 50), "timeout": ("antispam_timeout_seconds", 1, 2419200), "delete": ("antispam_delete_messages", None, None)}
+        if setting and setting.lower() in allowed and value is not None:
+            key, minimum, maximum = allowed[setting.lower()]
+            try:
+                parsed = value.lower() in ("true", "yes", "on", "1") if key.endswith("delete_messages") else int(value)
+                if minimum is not None and not minimum <= parsed <= maximum:
+                    raise ValueError
+                set_guild_setting(ctx.guild, key, parsed)
+                description = f"Updated this server's anti-spam setting **{setting}** to **{parsed}**."
+            except ValueError:
+                return await ctx.reply("Invalid value. Use window 1–30, messages/duplicates 2–20, mentions 1–50, timeout 1–2419200, or delete true/false.", mention_author=False)
+        else:
+            description = "Settings: `window 1-30`, `messages 2-20`, `duplicates 2-20`, `mentions 1-50`, `timeout 1-2419200`, `delete true/false`. Example: `antispam settings messages 4`."
+    elif mode != "status":
+        description = "Use `antispam on`, `antispam off`, `antispam status`, or `antispam settings <setting> <value>`."
+    else:
+        description = "Anti-spam status for this server."
+    enabled = bool(get_guild_setting(ctx.guild, "antispam_enabled", False))
+    embed = feature_embed("Anti-Spam", description, color=discord.Color.from_rgb(35, 0, 55))
+    embed.add_field(name="Status", value="ON" if enabled else "OFF", inline=True)
+    embed.add_field(name="Messages / window", value=f"{get_guild_setting(ctx.guild, 'antispam_message_limit', 3)} / {get_guild_setting(ctx.guild, 'antispam_window_seconds', 4)}s", inline=True)
+    embed.add_field(name="Repeated messages", value=str(get_guild_setting(ctx.guild, "antispam_duplicate_limit", 3)), inline=True)
+    embed.add_field(name="Mention limit", value=str(get_guild_setting(ctx.guild, "antispam_mention_limit", 6)), inline=True)
+    embed.add_field(name="Timeout", value=f"{get_guild_setting(ctx.guild, 'antispam_timeout_seconds', 300)}s", inline=True)
+    await ctx.reply(embed=embed, mention_author=False)
+
+@bot.command(name="antilink")
+@commands.guild_only()
+async def antilink_command(ctx, mode: str = None, *, argument: str = None):
+    """Toggle per-server link filtering and manage allowed domains/exemptions."""
+    if not has_admin_access(ctx.author):
+        return await ctx.reply("Bot staff or server administrators only.", mention_author=False)
+    mode = (mode or "status").lower()
+    if mode in ("on", "enable", "enabled"):
+        set_guild_setting(ctx.guild, "antilink_enabled", True)
+        description = f"Anti-link is now **ON** for **{ctx.guild.name}**."
+    elif mode in ("off", "disable", "disabled"):
+        set_guild_setting(ctx.guild, "antilink_enabled", False)
+        description = f"Anti-link is now **OFF** for **{ctx.guild.name}**."
+    elif mode in ("allow", "whitelist-add") and argument:
+        domain = argument.lower().strip().replace("https://", "").replace("http://", "").split("/", 1)[0].removeprefix("www.")
+        if not re.fullmatch(r"[a-z0-9.-]+", domain):
+            return await ctx.reply("Enter a domain such as `example.com`.", mention_author=False)
+        settings = guild_security_settings(ctx.guild)
+        domains = settings.setdefault("antilink_whitelist", [])
+        if domain not in domains:
+            domains.append(domain)
+        save_config()
+        description = f"Allowed domain added: `{domain}`."
+    elif mode in ("deny", "whitelist-remove") and argument:
+        settings = guild_security_settings(ctx.guild)
+        domains = settings.setdefault("antilink_whitelist", [])
+        domain = argument.lower().strip().replace("https://", "").replace("http://", "").split("/", 1)[0].removeprefix("www.")
+        settings["antilink_whitelist"] = [d for d in domains if d.lower() != domain]
+        save_config()
+        description = f"Allowed domain removed: `{domain}`."
+    elif mode == "exempt" and argument:
+        try: user_id = int(argument.strip(" <@!>"))
+        except ValueError: return await ctx.reply("Mention a user or provide a user ID.", mention_author=False)
+        settings = guild_security_settings(ctx.guild)
+        ids = settings.setdefault("antilink_exempt_ids", [])
+        if user_id not in ids: ids.append(user_id)
+        save_config()
+        description = f"User `{user_id}` is exempt from anti-link in this server."
+    elif mode == "unexempt" and argument:
+        try: user_id = int(argument.strip(" <@!>"))
+        except ValueError: return await ctx.reply("Mention a user or provide a user ID.", mention_author=False)
+        settings = guild_security_settings(ctx.guild)
+        settings["antilink_exempt_ids"] = [x for x in settings.get("antilink_exempt_ids", []) if str(x) != str(user_id)]
+        save_config()
+        description = f"User `{user_id}` is no longer exempt from anti-link in this server."
+    elif mode == "status":
+        description = "Use `antilink on/off/status`, `antilink allow <domain>`, `antilink deny <domain>`, `antilink exempt @user`, or `antilink unexempt @user`."
+    else:
+        description = "Invalid option. Use `antilink on/off/status`, `allow <domain>`, `deny <domain>`, `exempt @user`, or `unexempt @user`."
+    settings = guild_security_settings(ctx.guild)
+    enabled = bool(settings.get("antilink_enabled", False))
+    domains = settings.get("antilink_whitelist", [])
+    embed = feature_embed("Anti-Link", description, color=discord.Color.from_rgb(35, 0, 55))
+    embed.add_field(name="Status", value="ON" if enabled else "OFF", inline=True)
+    embed.add_field(name="Allowed domains", value=", ".join(f"`{d}`" for d in domains[:15]) or "None", inline=False)
+    await ctx.reply(embed=embed, mention_author=False)
+
 
 @bot.event
 async def on_message(message):
+    """Keep command processing separate from the independent moderation listeners."""
     if message.author.bot:
         return
 
-    # Keep normal prefixed commands working for everyone.
-    if not has_no_prefix_access(message):
+    # Handle normal prefixed commands first; The anti-spam and anti-link listeners run independently.
+    ctx = await bot.get_context(message)
+    if ctx.command is not None:
         await bot.process_commands(message)
         return
 
-    # First try the message as written, so normal prefix commands still work.
-    ctx = await bot.get_context(message)
-    if ctx.command is not None:
-        await bot.invoke(ctx)
-        return
+    # Preserve no-prefix command access without making AutoMod depend on this event.
+    if has_no_prefix_access(message) and message.guild is not None:
+        raw_content = (message.content or "").strip()
+        if raw_content:
+            active_prefix = config.get("guild_prefixes", {}).get(str(message.guild.id), PREFIX)
+            if not isinstance(active_prefix, str) or not active_prefix:
+                active_prefix = PREFIX
+            synthetic_message = copy.copy(message)
+            synthetic_message.content = f"{active_prefix}{raw_content}"
+            no_prefix_ctx = await bot.get_context(synthetic_message)
+            if no_prefix_ctx.command is not None:
+                await bot.invoke(no_prefix_ctx)
+                return
 
-    # No-prefix users can invoke ANY registered prefix command or command group
-    # by typing its name and arguments, e.g. "setuplogs", "backup create",
-    # "whitelist add @user", or "lockdown". The synthetic copy preserves the
-    # original message, author, channel, attachments, and reference.
-    raw_content = message.content.strip()
-    if not raw_content:
-        return
-    active_prefix = config.get("guild_prefixes", {}).get(str(message.guild.id), PREFIX)
-    synthetic_message = copy.copy(message)
-    synthetic_message.content = f"{active_prefix}{raw_content}"
-    no_prefix_ctx = await bot.get_context(synthetic_message)
-    if no_prefix_ctx.command is not None:
-        await bot.invoke(no_prefix_ctx)
+    await bot.process_commands(message)
 
 # ==================== ERRORS / STARTUP ====================
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         # Avoid cluttering chat for every unknown command, but explain the requested command.
-        if ctx.message.content.strip().lower().startswith(f"{PREFIX}antispam"):
-            return await ctx.reply(
-                "I couldn't find the anti-spam command. Restart the latest bot script and check the terminal for startup errors.",
-                mention_author=False
-            )
         return
     if isinstance(error, commands.MissingPermissions):
         return await ctx.reply(
@@ -4700,9 +4669,11 @@ async def slash_error(interaction, error):
 async def main():
     if not TOKEN:
         raise SystemExit(
-            "Bot token is missing. Add a top-level \"token\" value to your existing config.json, "
-            "or configure DISCORD_TOKEN in the hosting panel."
+            "Bot token is missing. In Railway > antinuker > Variables, add DISCORD_TOKEN "
+            "with the raw bot token copied from Discord Developer Portal > Bot. "
+            "The token must not be stored in config.json."
         )
+
     retry_delay = 5
     async with bot:
         while True:
@@ -4710,15 +4681,24 @@ async def main():
                 await bot.start(TOKEN)
                 # start() normally runs until the bot closes; return if it exits cleanly.
                 break
+            except discord.LoginFailure as error:
+                # 401 Unauthorized means the supplied token is invalid, revoked, or wrong.
+                # It is not a transient network failure, so do not retry in a restart loop.
+                logger.critical(
+                    "Discord rejected the bot token (401 Unauthorized). Update the secret in "
+                    "Railway Variables using the current token from Developer Portal > Bot. "
+                    "This version reads only DISCORD_TOKEN; config.json is not used for credentials. "
+                    "The token is not printed."
+                )
+                raise SystemExit(1) from error
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
-                # Covers temporary DNS/TCP/HTTPS connection failures. Invalid tokens
-                # and other Discord login errors are intentionally not swallowed.
                 logger.warning(
                     "Temporary Discord connection failure: %s. Retrying in %s seconds.",
                     error, retry_delay
                 )
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
