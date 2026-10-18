@@ -40,13 +40,34 @@ def _clean_embed_text(value):
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
 
+# A restrained visual language: a small diamond for plain labels and a star
+# for plain titles. Existing emoji/symbol-led titles are left as written.
+_EMBED_VISUAL_PREFIXES = (
+    "✦", "✧", "✨", "◇", "◆", "◈", "⛨", "⚔", "⌘", "※", "➤", "➜",
+    "•", "→", "✓", "✔", "✕", "✖", "⚠", "❌", "✅", "❗", "ℹ", "🔒",
+    "🛡", "⚙", "🎭", "🧰", "👤", "📚", "🚀", "🗓", "🆔", "🔨", "💾",
+    "📶", "🌐", "⏱", "👥", "📊", "🏠", "🛠", "🔧", "📌", "📝", "🔗",
+    "🧹", "🔨", "🔊", "🎨", "🖼", "👑", "💎", "📁", "🧾", "📈", "📉",
+)
+
+def _decorate_embed_label(value, prefix):
+    value = _clean_embed_text(value)
+    if not isinstance(value, str) or not value:
+        return value
+    if value.startswith(_EMBED_VISUAL_PREFIXES):
+        return value
+    return f"{prefix} {value}"
+
 class StyledEmbed(_DiscordEmbed):
     """Consistent $pyX branding with readable spacing and safe defaults."""
     def __init__(self, *args, **kwargs):
         if "color" not in kwargs and len(args) < 5:
             kwargs["color"] = _EMBED_PURPLE
-        if isinstance(kwargs.get("title"), str):
-            kwargs["title"] = _clean_embed_text(kwargs["title"])
+        # Also handle positional titles, while keeping all existing embed content.
+        if args and isinstance(args[0], str):
+            args = (_decorate_embed_label(args[0], "✦"),) + args[1:]
+        elif isinstance(kwargs.get("title"), str):
+            kwargs["title"] = _decorate_embed_label(kwargs["title"], "✦")
         if isinstance(kwargs.get("description"), str):
             kwargs["description"] = _clean_embed_text(kwargs["description"])
         super().__init__(*args, **kwargs)
@@ -72,10 +93,10 @@ class StyledEmbed(_DiscordEmbed):
             )
 
     def add_field(self, *, name, value, inline=True):
-        name = _clean_embed_text(name)
+        name = _decorate_embed_label(name, "◇")
         value = _clean_embed_text(value)
         if not name:
-            name = "Details"
+            name = "◇ Details"
         if not value:
             value = "—"
         return super().add_field(name=name, value=value, inline=inline)
@@ -1111,6 +1132,7 @@ class HelpView(discord.ui.View):
             "moderation": ("🛡️ Moderation & Channel Controls",
                            f"`{p}kick @member [reason]` — Kick a member\n"
                            f"`{p}ban @member|<user ID> [reason]` — Ban a member\n"
+                           f"`{p}timeout @member|<user ID> <1min|1d|1w> [reason]` — Timeout a member\n"
                            f"`{p}unban <user ID>` — Unban a user by ID\n"
                            f"`{p}purge <amount>` — Delete recent messages\n"
                            f"`{p}purge all` — Clear accessible channel history\n"
@@ -2132,6 +2154,109 @@ async def kick_command(
             "and role hierarchy.",
             mention_author=False
         )
+@bot.command(name="timeout", aliases=["mute"])
+@commands.guild_only()
+@commands.check(lambda ctx: has_admin_access(ctx.author))
+async def timeout_command(ctx, target: str, duration: str, *, reason="No reason provided"):
+    """Timeout a server member by mention or user ID for 1min, 1d, or 1w."""
+    duration_key = duration.strip().lower()
+    durations = {
+        "1min": (timedelta(minutes=1), "1 minute"),
+        "1d": (timedelta(days=1), "1 day"),
+        "1w": (timedelta(weeks=1), "1 week"),
+    }
+    if duration_key not in durations:
+        return await ctx.reply(
+            embed=role_embed(
+                "Invalid Timeout Duration",
+                "╭・Choose a supported duration: `1min`, `1d`, or `1w`.\n"
+                "╰・Usage: `!timeout <@user/user ID> <1min/1d/1w> [reason]`",
+                discord.Color.orange(),
+            ),
+            mention_author=False,
+        )
+
+    raw = target.strip()
+    match = re.fullmatch(r"<@!?(\d+)>", raw)
+    raw_id = match.group(1) if match else (raw if raw.isdigit() else None)
+    member = None
+    if raw_id:
+        member = ctx.guild.get_member(int(raw_id))
+        if member is None:
+            try:
+                member = await ctx.guild.fetch_member(int(raw_id))
+            except discord.NotFound:
+                member = None
+            except discord.HTTPException:
+                return await ctx.reply(
+                    embed=role_embed("Lookup Failed", "Discord couldn't look up that member. Please try again.", discord.Color.red()),
+                    mention_author=False,
+                )
+    else:
+        try:
+            member = await commands.MemberConverter().convert(ctx, raw)
+        except commands.MemberNotFound:
+            member = None
+
+    if member is None:
+        return await ctx.reply(
+            embed=role_embed(
+                "Member Not Found",
+                "╭・I couldn't find that member in this server.\n"
+                "╰・Use their mention or numeric user ID.",
+                discord.Color.red(),
+            ),
+            mention_author=False,
+        )
+
+    if member.id == ctx.guild.owner_id or (
+        not is_bot_admin_id(ctx.author.id) and member.top_role >= ctx.author.top_role
+    ):
+        return await ctx.reply(
+            embed=role_embed(
+                "Cannot Timeout Member",
+                "╰・You can't timeout the server owner or a member with an equal/higher role.",
+                discord.Color.red(),
+            ),
+            mention_author=False,
+        )
+
+    timeout_length, duration_label = durations[duration_key]
+    try:
+        await member.timeout(timeout_length, reason=f"{ctx.author} ({ctx.author.id}): {reason}")
+        embed = role_embed(
+            "Member Timed Out",
+            f"╭・**User:** {discord.utils.escape_markdown(member.name)}\n"
+            f"├・**User ID:** `{member.id}`\n"
+            f"├・**Duration:** {duration_label}\n"
+            f"├・**Reason:** {discord.utils.escape_markdown(reason)}\n"
+            f"╰・**Moderator:** {discord.utils.escape_markdown(ctx.author.name)}",
+            discord.Color.from_rgb(128, 0, 255),
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+        await send_log(
+            ctx.guild,
+            "Member timed out",
+            f"{member} (`{member.id}`) was timed out by {ctx.author} (`{ctx.author.id}`).\n"
+            f"Duration: {duration_label}\nReason: {reason}",
+            discord.Color.orange(),
+        )
+    except discord.Forbidden:
+        await ctx.reply(
+            embed=role_embed(
+                "Timeout Failed",
+                "╰・I need **Moderate Members** permission, and my role must be above the target's role.",
+                discord.Color.red(),
+            ),
+            mention_author=False,
+        )
+    except discord.HTTPException:
+        await ctx.reply(
+            embed=role_embed("Timeout Failed", "╰・Discord couldn't apply the timeout. Please try again.", discord.Color.red()),
+            mention_author=False,
+        )
+
+
 @bot.command(name="ban")
 @commands.guild_only()
 @commands.check(lambda ctx: has_admin_access(ctx.author))
