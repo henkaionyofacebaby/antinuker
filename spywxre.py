@@ -504,8 +504,26 @@ async def send_log(guild, title, description, color=None):
     except discord.HTTPException:
         logger.warning("Could not send opt-in log in guild %s", guild.id)
 async def notify_owners(guild, message):
-    """Send anti-nuke alerts to configured bot owners as branded embeds."""
+    """Send anti-nuke alert embeds to the developer and configured owner IDs."""
     if not config.get("notify_owner", True):
+        logger.info("Owner anti-nuke DM skipped: notify_owner is disabled.")
+        return
+
+    # Include the configured developer ID as well as any extra owners. Previously
+    # this loop used only config["owner_ids"], which defaults to [], so a fresh
+    # config silently sent alerts to nobody.
+    raw_owner_ids = [DEVELOPER_ID, *config.get("owner_ids", [])]
+    owner_ids = []
+    for value in raw_owner_ids:
+        try:
+            owner_id = int(value)
+            if owner_id > 0 and owner_id not in owner_ids:
+                owner_ids.append(owner_id)
+        except (TypeError, ValueError):
+            continue
+
+    if not owner_ids:
+        logger.error("Owner anti-nuke DM not sent: no valid owner IDs configured.")
         return
 
     embed = StyledEmbed(
@@ -517,14 +535,20 @@ async def notify_owners(guild, message):
     embed.add_field(name="Server", value=f"{guild.name[:200]}\n`{guild.id}`", inline=False)
     embed.set_footer(text="$pyX Security • Owner Notification")
 
-    for owner_id in config.get("owner_ids", []):
+    for owner_id in owner_ids:
         try:
-            user = bot.get_user(int(owner_id))
+            user = bot.get_user(owner_id)
             if user is None:
-                user = await bot.fetch_user(int(owner_id))
+                user = await bot.fetch_user(owner_id)
             await user.send(embed=embed)
-        except (discord.HTTPException, discord.Forbidden, TypeError, ValueError):
-            continue
+            logger.info("Sent owner anti-nuke DM to user ID %s for guild %s.", owner_id, guild.id)
+        except discord.Forbidden:
+            logger.warning(
+                "Could not DM owner ID %s: Discord blocked the DM (privacy settings, "
+                "blocked bot, or no available DM channel).", owner_id
+            )
+        except (discord.HTTPException, TypeError, ValueError):
+            logger.exception("Could not send owner anti-nuke DM to user ID %s.", owner_id)
 # Keep a short per-member message history and prevent repeated punishment.
 
 
@@ -922,6 +946,18 @@ async def on_audit_log_entry_create(entry):
         logger.exception("Audit log processing failed")
 @bot.event
 async def on_member_join(member):
+    # Log every member join independently from raid-protection settings.
+    account_age = discord.utils.utcnow() - member.created_at
+    age_days = max(0, account_age.days)
+    await send_log(
+        member.guild,
+        "✅ Member Joined",
+        f"**User:** {member.mention} (`{member.id}`)\n"
+        f"**Account Created:** {discord.utils.format_dt(member.created_at, style='R')}\n"
+        f"**Account Age:** {age_days} days\n"
+        f"**Member Count:** {member.guild.member_count or 'Unknown'}",
+        discord.Color.green()
+    )
     if member.bot or not config.get("raid_protection", True):
         return
     now = time.monotonic()
@@ -934,14 +970,41 @@ async def on_member_join(member):
     if len(history) >= threshold:
         await send_log(
             member.guild,
-            "Possible join raid",
-            f"{len(history)} members joined within "
-            f"{window} seconds. Review the join activity.",
+            "⚠️ Possible Join Raid",
+            f"{len(history)} members joined within {window} seconds. Review the join activity.",
             discord.Color.orange()
         )
         history.clear()
+
+@bot.event
+async def on_member_remove(member):
+    await send_log(
+        member.guild,
+        "🚪 Member Left",
+        f"**User:** {member} (`{member.id}`)\n**Member Count:** {member.guild.member_count or 'Unknown'}",
+        discord.Color.orange()
+    )
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot or before.channel == after.channel:
+        return
+    if before.channel is None and after.channel is not None:
+        title = "🔊 Member Joined VC"
+        detail = f"**User:** {member.mention} (`{member.id}`)\n**Voice Channel:** {after.channel.mention}"
+        color = discord.Color.green()
+    elif before.channel is not None and after.channel is None:
+        title = "🔇 Member Left VC"
+        detail = f"**User:** {member.mention} (`{member.id}`)\n**Voice Channel:** {before.channel.mention}"
+        color = discord.Color.orange()
+    else:
+        title = "🔁 Member Switched VC"
+        detail = f"**User:** {member.mention} (`{member.id}`)\n**From:** {before.channel.mention}\n**To:** {after.channel.mention}"
+        color = discord.Color.blurple()
+    await send_log(member.guild, title, detail, color)
 @bot.event
 async def on_guild_channel_create(channel):
+    await send_log(channel.guild, "📁 Channel Created", f"**Name:** {channel.name}\n**ID:** `{channel.id}`\n**Type:** `{channel.type}`", discord.Color.green())
     # Refresh only the changed channel instead of rebuilding the whole guild snapshot.
     try:
         guild = channel.guild
@@ -962,6 +1025,7 @@ async def on_guild_channel_create(channel):
 
 @bot.event
 async def on_guild_role_create(role):
+    await send_log(role.guild, "🆕 Role Created", f"**Name:** {role.name}\n**ID:** `{role.id}`\n**Color:** `{role.color}`\n**Mentionable:** `{role.mentionable}`", discord.Color.green())
     # Refresh only the new role to avoid repeated full-guild scans during bursts.
     try:
         guild = role.guild
@@ -3169,6 +3233,14 @@ async def join_voice_command(ctx):
 async def on_message_delete(message):
     if message.guild is None or message.author.bot:
         return
+    content = (message.content or "[No text content]").strip()
+    await send_log(
+        message.guild,
+        "🗑️ Message Deleted",
+        f"**User:** {message.author.mention} (`{message.author.id}`)\n"
+        f"**Channel:** {message.channel.mention}\n**Content:**\n{content[:2500]}",
+        discord.Color.red()
+    )
     recent_deleted_messages[(message.guild.id, message.channel.id)] = {
         "author_id": message.author.id, "author_name": str(message.author),
         "content": message.content or "[No text content]", "created_at": message.created_at.isoformat(),
@@ -4332,7 +4404,7 @@ async def antilink_message_listener(message):
         return
     try:
         if guild.me and guild.me.guild_permissions.manage_messages:
-            await message.delete(reason="$pyX Security anti-link: prohibited link")
+            await message.delete()  # PartialMessage.delete() does not accept a reason argument.
         else:
             logger.warning("Anti-link detected a link in guild %s but bot lacks Manage Messages", guild.id)
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
