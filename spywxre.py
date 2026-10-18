@@ -1487,8 +1487,27 @@ async def bot_info_command(ctx):
 
 @bot.command(name="ping")
 async def ping_command(ctx):
+    """Show the bot's current Discord gateway latency in a branded embed."""
     latency_ms = round(bot.latency * 1000)
-    await ctx.reply(f"📶 latency is **{latency_ms} ms**!", mention_author=False)
+    connection_status = "Online" if bot.is_ready() else "Connecting"
+    latency_note = "Connection looks healthy." if latency_ms < 200 else (
+        "Connection is a little slow." if latency_ms < 400 else
+        "Connection is currently experiencing high latency."
+    )
+
+    embed = StyledEmbed(
+        title="📶 Connection Status",
+        description=(
+            f"╭・**Latency:** `{latency_ms} ms`\n"
+            f"├・**Status:** {connection_status}\n"
+            f"╰・{latency_note}"
+        ),
+        color=discord.Color.from_rgb(35, 0, 55),
+        timestamp=discord.utils.utcnow(),
+    )
+    if bot.user:
+        embed.set_thumbnail(url=bot.user.display_avatar.url)
+    await ctx.reply(embed=embed, mention_author=False)
 
 # ==================== SERVER-SPECIFIC BOT PROFILE ====================
 PROFILE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -2121,39 +2140,55 @@ async def afk_message_listener(message):
 @bot.command(name="kick")
 @commands.guild_only()
 @commands.check(lambda ctx: has_admin_access(ctx.author))
-async def kick_command(
-    ctx,
-    member: discord.Member,
-    *,
-    reason="No reason provided"
-):
-    if (
-        member.id == ctx.guild.owner_id
-        or (not is_bot_admin_id(ctx.author.id) and member.top_role >= ctx.author.top_role)
-    ):
-        return await ctx.reply(
-            "You cannot kick the server owner or a member "
-            "with an equal/higher role.",
-            mention_author=False
-        )
+async def kick_command(ctx, target: str, *, reason="No reason provided"):
+    """Kick a server member by mention or numeric Discord user ID."""
+    raw = target.strip()
+    match = re.fullmatch(r"<@!?(\d+)>", raw)
+    raw_id = match.group(1) if match else (raw if raw.isdigit() else None)
+    member = None
+    if raw_id:
+        member = ctx.guild.get_member(int(raw_id))
+        if member is None:
+            try:
+                member = await ctx.guild.fetch_member(int(raw_id))
+            except discord.NotFound:
+                member = None
+            except discord.HTTPException:
+                return await ctx.reply(embed=role_embed(
+                    "Member Lookup Failed", "╰・Discord couldn't look up that member. Please try again.", discord.Color.red()
+                ), mention_author=False)
+    else:
+        try:
+            member = await commands.MemberConverter().convert(ctx, raw)
+        except commands.MemberNotFound:
+            member = None
+    if member is None:
+        return await ctx.reply(embed=role_embed(
+            "Member Not Found", "╭・I couldn't find that member in this server.\n╰・Use a mention or numeric user ID.\n\n◇ Usage: `!kick <@user/user ID> [reason]`", discord.Color.red()
+        ), mention_author=False)
+    if member.id == ctx.guild.owner_id or (not is_bot_admin_id(ctx.author.id) and member.top_role >= ctx.author.top_role):
+        return await ctx.reply(embed=role_embed(
+            "Cannot Kick Member", "╰・You can't kick the server owner or a member with an equal/higher role.", discord.Color.red()
+        ), mention_author=False)
     try:
-        await member.kick(reason=f"{ctx.author}: {reason}")
-        await ctx.reply(
-            f"Kicked {member.mention}. Reason: {reason}",
-            mention_author=False
+        await member.kick(reason=f"{ctx.author} ({ctx.author.id}): {reason}")
+        embed = role_embed(
+            "Member Kicked",
+            f"╭・**User:** {discord.utils.escape_markdown(member.name)}\n"
+            f"├・**User ID:** `{member.id}`\n"
+            f"├・**Reason:** {discord.utils.escape_markdown(reason)}\n"
+            f"╰・**Moderator:** {discord.utils.escape_markdown(ctx.author.name)}",
+            discord.Color.from_rgb(128, 0, 255),
         )
-        await send_log(
-            ctx.guild,
-            "Member kicked",
-            f"{member} was kicked by {ctx.author}.\n"
-            f"Reason: {reason}"
-        )
+        await ctx.reply(embed=embed, mention_author=False)
+        await send_log(ctx.guild, "Member kicked", f"{member} (`{member.id}`) was kicked by {ctx.author} (`{ctx.author.id}`).\nReason: {reason}")
     except discord.Forbidden:
-        await ctx.reply(
-            "I cannot kick that member. Check my permissions "
-            "and role hierarchy.",
-            mention_author=False
-        )
+        await ctx.reply(embed=role_embed(
+            "Kick Failed", "╰・I need **Kick Members** permission, and my role must be above the target's role.", discord.Color.red()
+        ), mention_author=False)
+    except discord.HTTPException:
+        await ctx.reply(embed=role_embed("Kick Failed", "╰・Discord couldn't complete the kick. Please try again.", discord.Color.red()), mention_author=False)
+
 @bot.command(name="timeout", aliases=["mute"])
 @commands.guild_only()
 @commands.check(lambda ctx: has_admin_access(ctx.author))
@@ -2261,7 +2296,7 @@ async def timeout_command(ctx, target: str, duration: str, *, reason="No reason 
 @commands.guild_only()
 @commands.check(lambda ctx: has_admin_access(ctx.author))
 async def ban_command(ctx, target: str, *, reason="No reason provided"):
-    """Ban a member by mention, username, or numeric Discord ID (including non-members)."""
+    """Ban a member by mention or numeric Discord user ID."""
     raw = target.strip()
     match = re.fullmatch(r"<@!?(\d+)>", raw)
     raw_id = match.group(1) if match else (raw if raw.isdigit() else None)
@@ -2273,35 +2308,48 @@ async def ban_command(ctx, target: str, *, reason="No reason provided"):
                 member = await ctx.guild.fetch_member(int(raw_id))
             except discord.NotFound:
                 member = None
-            except discord.HTTPException as error:
-                return await ctx.reply(f"Could not look up that member: {error}", mention_author=False)
+            except discord.HTTPException:
+                return await ctx.reply(embed=role_embed("Member Lookup Failed", "╰・Discord couldn't look up that member. Please try again.", discord.Color.red()), mention_author=False)
         if member is None:
-            # Discord permits banning a user who is not currently in the guild.
             try:
                 await ctx.guild.ban(discord.Object(id=int(raw_id)), reason=f"{ctx.author} ({ctx.author.id}): {reason}")
-                await ctx.reply(embed=role_embed("Member Banned", f"**User ID:** `{raw_id}`\n**Reason:** {reason}" , discord.Color.red()), mention_author=False)
+                embed = role_embed(
+                    "Member Banned",
+                    f"╭・**User:** Unknown / not in server\n├・**User ID:** `{raw_id}`\n├・**Reason:** {discord.utils.escape_markdown(reason)}\n╰・**Moderator:** {discord.utils.escape_markdown(ctx.author.name)}",
+                    discord.Color.from_rgb(128, 0, 255),
+                )
+                await ctx.reply(embed=embed, mention_author=False)
                 await send_log(ctx.guild, "Member banned", f"User ID `{raw_id}` was banned by {ctx.author} (`{ctx.author.id}`).\nReason: {reason}", discord.Color.red())
             except discord.Forbidden:
-                await ctx.reply("I cannot ban that user. Check my **Ban Members** permission.", mention_author=False)
-            except discord.HTTPException as error:
-                await ctx.reply(f"Ban failed: {error}", mention_author=False)
+                await ctx.reply(embed=role_embed("Ban Failed", "╰・I need **Ban Members** permission to ban this user.", discord.Color.red()), mention_author=False)
+            except discord.HTTPException:
+                await ctx.reply(embed=role_embed("Ban Failed", "╰・Discord couldn't complete the ban. Please try again.", discord.Color.red()), mention_author=False)
             return
     else:
         try:
             member = await commands.MemberConverter().convert(ctx, raw)
         except commands.MemberNotFound:
-            return await ctx.reply("Member not found. Use a mention, username, or numeric user ID.", mention_author=False)
-
+            return await ctx.reply(embed=role_embed(
+                "Member Not Found", "╭・I couldn't find that member.\n╰・Use a mention or numeric user ID.\n\n◇ Usage: `!ban <@user/user ID> [reason]`", discord.Color.red()
+            ), mention_author=False)
     if member.id == ctx.guild.owner_id or (not is_bot_admin_id(ctx.author.id) and member.top_role >= ctx.author.top_role):
-        return await ctx.reply("You cannot ban the server owner or a member with an equal/higher role.", mention_author=False)
+        return await ctx.reply(embed=role_embed("Cannot Ban Member", "╰・You can't ban the server owner or a member with an equal/higher role.", discord.Color.red()), mention_author=False)
     try:
         await member.ban(reason=f"{ctx.author} ({ctx.author.id}): {reason}")
-        await ctx.reply(embed=role_embed("Member Banned", f"**User:** {member}\n**User ID:** `{member.id}`\n**Reason:** {reason}", discord.Color.red()), mention_author=False)
+        embed = role_embed(
+            "Member Banned",
+            f"╭・**User:** {discord.utils.escape_markdown(member.name)}\n"
+            f"├・**User ID:** `{member.id}`\n"
+            f"├・**Reason:** {discord.utils.escape_markdown(reason)}\n"
+            f"╰・**Moderator:** {discord.utils.escape_markdown(ctx.author.name)}",
+            discord.Color.from_rgb(128, 0, 255),
+        )
+        await ctx.reply(embed=embed, mention_author=False)
         await send_log(ctx.guild, "Member banned", f"{member} (`{member.id}`) was banned by {ctx.author} (`{ctx.author.id}`).\nReason: {reason}", discord.Color.red())
     except discord.Forbidden:
-        await ctx.reply("I cannot ban that member. Check my **Ban Members** permission and role hierarchy.", mention_author=False)
-    except discord.HTTPException as error:
-        await ctx.reply(f"Ban failed: {error}", mention_author=False)
+        await ctx.reply(embed=role_embed("Ban Failed", "╰・I need **Ban Members** permission, and my role must be above the target's role.", discord.Color.red()), mention_author=False)
+    except discord.HTTPException:
+        await ctx.reply(embed=role_embed("Ban Failed", "╰・Discord couldn't complete the ban. Please try again.", discord.Color.red()), mention_author=False)
 
 @bot.command(name="unban")
 @commands.guild_only()
@@ -4760,10 +4808,22 @@ async def on_command_error(ctx, error):
             mention_author=False
         )
     if isinstance(error, commands.MissingRequiredArgument):
-        return await ctx.reply(
-            f"Missing argument: `{error.param.name}`.",
-            mention_author=False
+        command_name = ctx.command.qualified_name if ctx.command else "command"
+        usage = {
+            "ban": "`!ban <@user/user ID> [reason]`",
+            "kick": "`!kick <@user/user ID> [reason]`",
+            "timeout": "`!timeout <@user/user ID> <1min/1d/1w> [reason]`",
+            "mute": "`!timeout <@user/user ID> <1min/1d/1w> [reason]`",
+        }.get(command_name, f"`{ctx.prefix}{command_name} ...`")
+        embed = role_embed(
+            "Missing Command Details",
+            f"╭・Looks like a required detail is missing.\n"
+            f"├・**Command:** `{ctx.prefix}{command_name}`\n"
+            f"╰・**Usage:** {usage}\n\n"
+            "◇ Example: `!ban 123456789012345678 Rule violations`",
+            discord.Color.orange(),
         )
+        return await ctx.reply(embed=embed, mention_author=False)
     if isinstance(error, commands.MemberNotFound):
         return await ctx.reply(
             "Member not found. Mention them or use their ID.",
