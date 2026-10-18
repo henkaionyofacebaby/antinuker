@@ -1059,120 +1059,109 @@ async def manager_check(ctx):
         return False
     return True
 # ==================== PREFIX COMMANDS ====================
+class HelpCategorySelect(discord.ui.Select):
+    def __init__(self, ctx):
+        self.ctx = ctx
+        options = [
+            discord.SelectOption(label="Home", value="home", description="Overview and how to use commands", emoji="🏠", default=True),
+            discord.SelectOption(label="Moderation", value="moderation", description="Kick, ban, roles, and channel controls", emoji="🔨"),
+            discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-spam, anti-link, and whitelist", emoji="🛡️"),
+            discord.SelectOption(label="Logs & Backups", value="logs", description="Security logs, backups, and deleted messages", emoji="💾"),
+            discord.SelectOption(label="Utility", value="utility", description="Info, avatar, banner, AFK, and ping", emoji="✨"),
+            discord.SelectOption(label="Premium", value="premium", description="Premium customization and commands", emoji="💎"),
+        ]
+        super().__init__(placeholder="Select a category to explore commands…", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the person who ran this command can use this menu.", ephemeral=True)
+            return
+        self.view.update_embed(self.values[0])
+        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+
+
+class HelpMenuView(discord.ui.View):
+    def __init__(self, ctx, prefix):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.prefix = prefix
+        self.add_item(HelpCategorySelect(ctx))
+        self.embed = None
+        self.update_embed("home")
+
+    def update_embed(self, category):
+        p = self.prefix
+        pages = {
+            "home": ("✦ $pyX Security | Command Center",
+                "Powerful server protection and moderation, built for safer communities.\n\n"
+                f"**Prefix:** `{p}`\n**Developer:** spywxre\n\n"
+                "Select a category from the dropdown menu below to explore commands.\n"
+                "Use `admhelp` for restricted bot-staff commands."),
+            "moderation": ("🔨 Moderation & Roles",
+                f"`{p}kick @member|<ID> [reason]` — Kick a member\n"
+                f"`{p}ban @member|<ID> [reason]` — Ban a member by mention or ID\n"
+                f"`{p}unban <user ID>` — Unban by user ID\n"
+                f"`{p}purge <amount>` — Delete recent messages\n"
+                f"`{p}purge all` — Clear accessible channel history\n"
+                f"`{p}purge @member <amount>` — Purge a member's messages\n"
+                f"`{p}role @member|<ID> <role name|ID>` — Give a role\n"
+                f"`{p}unrole @member|<ID> <role name|ID>` — Remove a role\n"
+                f"`{p}lock` / `{p}unlock` — Lock or unlock this channel\n"
+                f"`{p}lockdown` / `{p}unlockdown` — Server lockdown controls"),
+            "security": ("🛡️ Server Protection",
+                f"`{p}antinuke on/off` — Toggle anti-nuke protection\n"
+                f"`{p}security` — View security status\n"
+                f"`{p}antispam on/off/status` — Configure anti-spam\n"
+                f"`{p}antispam settings <setting> <value>` — Tune anti-spam\n"
+                f"`{p}antilink on/off/status` — Configure link filtering\n"
+                f"`{p}antilink allow <domain>` / `{p}antilink deny <domain>` — Domain rules\n"
+                f"`{p}antilink exempt @member` / `{p}antilink unexempt @member` — Exemptions\n"
+                f"`{p}whitelist add/remove @member` — Manage whitelist\n"
+                f"`{p}whitelist list` — View whitelist"),
+            "logs": ("💾 Logs & Backups",
+                f"`{p}setuplogs #channel` — Configure security logs\n"
+                f"`{p}disablelogs` — Disable security logs\n"
+                f"`{p}backup create` — Create a server backup (Premium)\n"
+                f"`{p}backup load` — Restore a server backup (Premium)\n"
+                f"`{p}snipe` — View the latest deleted message\n"
+                "Security events and audit-related actions are posted to the configured log channel."),
+            "utility": ("✨ Utility & Information",
+                f"`{p}info` — Open the bot information menu\n"
+                f"`{p}ping` — Check bot latency\n"
+                f"`{p}sinfo` — View server information\n"
+                f"`{p}av [@member|ID]` — View a user's avatar (Premium)\n"
+                f"`{p}banner [@member|ID]` — View a user's banner (Premium)\n"
+                f"`{p}afk [message]` — Set your AFK status\n"
+                f"`{p}joinvc` — Join your current voice channel\n"
+                f"`{p}help` — Open this command menu"),
+            "premium": ("💎 Premium & Customization",
+                f"`{p}prefix <new_prefix>` — Change this server's prefix (Premium)\n"
+                f"`{p}cb <image URL>` — Change bot banner (Premium)\n"
+                f"`{p}cp <image URL>` — Change bot profile picture (Premium)\n"
+                f"`{p}cn <new name|reset>` — Set/reset server nickname (Premium)\n"
+                f"`{p}steal <custom emoji> [name]` — Add a custom emoji (Premium)\n"
+                "Premium availability depends on the server's configured access."),
+        }
+        title, description = pages.get(category, pages["home"])
+        self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
+        if bot.user:
+            self.embed.set_thumbnail(url=bot.user.display_avatar.url)
+            banner = getattr(bot.user, "banner", None)
+            if banner:
+                self.embed.set_image(url=banner.url)
+            self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
+        for child in self.children:
+            if isinstance(child, HelpCategorySelect):
+                for option in child.options:
+                    option.default = option.value == category
+
+
 @bot.command(name="help")
 async def help_command(ctx):
-    """Show the regular server command guide."""
-    purple = discord.Color.from_rgb(128, 0, 255)
+    """Show the interactive command guide."""
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
-    pfx = active_prefix
-
-    embed = StyledEmbed(
-        title="✦ $pyX Security | Command Center",
-        description=(
-            "A server protection toolkit built to help moderators manage and secure their community.\n"
-            f"Use the command prefix **`{pfx}`**. Replace placeholders with the relevant member, role, channel, or amount. "
-            "Administrator-only staff commands are listed separately in `admhelp`."
-        ),
-        color=purple,
-        timestamp=discord.utils.utcnow(),
-    )
-    embed.add_field(
-        name="🛡️ Moderation",
-        value=(
-            f"`{pfx}kick @member [reason]` — Kick a member\n"
-            f"`{pfx}ban @member|<user ID> [reason]` — Ban a member\n"
-            f"`{pfx}unban <user ID>` — Unban a user by ID\n"
-            f"`{pfx}purge <amount>` — Delete recent messages\n"
-            f"`{pfx}purge all` — Clear accessible channel history\n"
-            f"`{pfx}purge @user <amount>` — Purge one member's messages\n"
-            f"`{pfx}lock` — Lock only the current channel\n"
-            f"`{pfx}unlock` — Restore the current channel's saved permissions\n"
-            f"`{pfx}lockdown` — Lock down server channels\n"
-            f"`{pfx}unlockdown` — Restore permissions saved by server lockdown"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🎭 Role Management",
-        value=(
-            f"`{pfx}role @member|<user ID> <role name|role ID>` — Give a role to a member\n"
-            f"`{pfx}unrole @member|<user ID> <role name|role ID>` — Remove a role from a member\n"
-            "`/roleall` — Give a role to eligible members\n"
-            "`/unroleall` — Remove a role from eligible members"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🔒 Server Protection",
-        value=(
-            f"`{pfx}antinuke on/off` — Enable or disable anti-nuke protection\n"
-            f"`{pfx}security` — View security status\n"
-            f"`{pfx}antispam on/off/status` — Configure per-server anti-spam\n"
-            f"`{pfx}antispam settings <window|messages|duplicates|mentions|timeout|delete> <value>` — Tune spam protection\n"
-            f"`{pfx}antilink on/off/status` — Configure per-server link filtering\n"
-            f"`{pfx}antilink allow <domain>` / `{pfx}antilink deny <domain>` — Manage allowed domains\n"
-            f"`{pfx}antilink exempt @member` / `{pfx}antilink unexempt @member` — Manage link exemptions\n"
-            f"`{pfx}whitelist add @member` — Add a member to the whitelist\n"
-            f"`{pfx}whitelist remove @member` — Remove a member from the whitelist\n"
-            f"`{pfx}whitelist list` — View the server whitelist\n"
-            "`/lockdown` — Lock down server channels\n"
-            "`/unlockdown` — Restore permissions saved by server lockdown"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🧰 Backups & Security Logs",
-        value=(
-            f"`{pfx}backup create` — Create a server backup (Premium)\n"
-            f"`{pfx}backup load` — Restore a server backup (Premium)\n"
-            f"`{pfx}setuplogs #channel` — Set up security logs\n"
-            f"`{pfx}disablelogs` — Disable security logs\n"
-            f"`{pfx}snipe` — View the latest deleted message"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="👤 Utility & Information",
-        value=(
-            f"`{pfx}afk [message]` — Set your AFK status\n"
-            f"`{pfx}sinfo` — View server information\n"
-            f"`{pfx}info` — View $pyX Security information\n"
-            f"`{pfx}av [@user]` — View a user's avatar (Premium)\n"
-            f"`{pfx}joinvc` — Join your current voice channel"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="✨ Premium Customization",
-        value=(
-            f"`{pfx}cb <image URL>` — Change the bot's banner (Premium)\n"
-            f"`{pfx}cp <image URL>` — Change the bot's profile picture (Premium)\n"
-            f"`{pfx}cn <new name>` — Change the bot's nickname in this server (Premium)\n"
-            f"`{pfx}cn reset` — Reset the bot's server nickname (Premium)\n"
-            f"`{pfx}steal <custom emoji> [name]` — Add a custom emoji to this server (Premium)\n"
-            "You can attach an image when using the banner or profile-picture command."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="⚙️ Configuration",
-        value=(
-            f"`{pfx}prefix <new_prefix>` — Change this server's prefix (Premium)\n"
-            f"`{pfx}help` — Show this command guide\n"
-            f"`{pfx}admhelp` — Show the restricted administrator guide"
-        ),
-        inline=False,
-    )
-    if bot.user:
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-        bot_banner = getattr(bot.user, "banner", None)
-        if bot_banner:
-            embed.set_image(url=bot_banner.url)
-    embed.set_footer(
-        text="$pyX Security • Developed by spywxre",
-        icon_url=bot.user.display_avatar.url if bot.user else None,
-    )
-    await ctx.reply(embed=embed, mention_author=False)
+    view = HelpMenuView(ctx, active_prefix)
+    await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
 
 @bot.command(name="admhelp", aliases=["adminhelp", "staffhelp"])
@@ -1359,78 +1348,70 @@ async def server_info_command(ctx):
     await ctx.reply(embed=embed, mention_author=False)
 
 
+class BotInfoCategorySelect(discord.ui.Select):
+    def __init__(self, ctx):
+        self.ctx = ctx
+        options = [
+            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", emoji="🏠", default=True),
+            discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-raid, and whitelist", emoji="🛡️"),
+            discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls", emoji="🔨"),
+            discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization", emoji="💾"),
+            discord.SelectOption(label="Statistics", value="stats", description="Bot runtime statistics", emoji="📊"),
+        ]
+        super().__init__(placeholder="Select a category to explore commands…", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the person who ran the command can use this menu.", ephemeral=True)
+            return
+        self.view.update_embed(self.values[0])
+        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+
+
+class BotInfoView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.add_item(BotInfoCategorySelect(ctx))
+        self.embed = None
+        self.update_embed("home")
+
+    def update_embed(self, category):
+        bot_user = bot.user
+        labels = {
+            "home": ("$pyX Security", "Powerful Discord server protection and moderation.\n\n**Developed by:** spywxre\n**Made for:** Protection\n\nSelect a category from the dropdown menu below to explore my commands."),
+            "security": ("🛡️ Server Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
+            "moderation": ("🔨 Moderation & Controls", "• Kick and ban members\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
+            "backups": ("💾 Backups, Logs & Customization", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
+            "stats": ("📊 Bot Statistics", f"**Servers:** `{len(bot.guilds):,}`\n**Users:** `{sum(g.member_count or 0 for g in bot.guilds):,}` (approximate, summed across servers)\n**Commands:** `{len(bot.commands):,}` prefix commands\n**Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
+        }
+        title, description = labels.get(category, labels["home"])
+        self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
+        if bot_user:
+            self.embed.set_thumbnail(url=bot_user.display_avatar.url)
+            banner = getattr(bot_user, "banner", None)
+            if banner:
+                self.embed.set_image(url=banner.url)
+            self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
+        for item in self.children:
+            if isinstance(item, BotInfoCategorySelect):
+                for option in item.options:
+                    option.default = option.value == category
+
+
 @bot.command(name="info", aliases=["botinfo", "about"])
 async def bot_info_command(ctx):
-    purple = discord.Color.from_rgb(128, 0, 255)
-    bot_user = bot.user
-    if bot_user is None:
+    if bot.user is None:
         return await ctx.reply("Bot info is not available yet.", mention_author=False)
+    view = BotInfoView(ctx)
+    await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
-    embed = StyledEmbed(
-        title="$pyX Security | Bot Information",
-        description=(
-            "**Purpose**\n"
-            "$pyX Security is a Discord security and moderation bot designed to help server staff respond to raids, destructive actions, and everyday moderation needs.\n\n"
-            "**Developed by:** spywxre\n"
-            "**Built for:** Server protection and moderation"
-        ),
-        color=purple,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_thumbnail(url=bot_user.display_avatar.url)
-    embed.add_field(
-        name="🛡️ Server Security",
-        value=(
-            "• Anti-nuke monitoring with configurable thresholds and punishment\n"
-            "• Anti-raid join detection and optional lockdown\n"
-            "• Whitelist management and security status checks\n"
-            "• Security logs and owner notifications"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🔨 Moderation & Channel Controls",
-        value=(
-            "• Kick and ban members\n"
-            "• Assign or remove roles, including bulk role management\n"
-            "• Purge recent messages or accessible channel history\n"
-            "• Lock/unlock a channel or lock down/unlock the server\n"
-            "• View the latest deleted message with snipe\n"
-            "• AFK status and voice-channel join support"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="💾 Backups, Logs & Customization",
-        value=(
-            "• Create and restore server backups (Premium)\n"
-            "• Configure or disable security log channels\n"
-            "• View server information and member avatars (avatar lookup may require Premium)\n"
-            "• Change the bot's server-specific banner, profile picture, or nickname (Premium)\n"
-            "• Add custom emojis to a server (Premium)\n"
-            "• Configure the server command prefix (Premium)\n"
-            "• Use prefix and slash commands"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📊 Runtime Information",
-        value=(
-            f"**Servers:** {len(bot.guilds):,}\n"
-            f"**Bot ID:** `{bot_user.id}`"
-        ),
-        inline=True
-    )
-    embed.add_field(
-        name="⚠️ Note",
-        value="Protection depends on the bot's permissions, role hierarchy, enabled intents, and each server's configuration.",
-        inline=True
-    )
-    bot_banner = getattr(bot_user, "banner", None)
-    if bot_banner:
-        embed.set_image(url=bot_banner.url)
-    embed.set_footer(text="$pyX Security • Developed by spywxre", icon_url=bot_user.display_avatar.url)
-    await ctx.reply(embed=embed, mention_author=False)
+
+@bot.command(name="ping")
+async def ping_command(ctx):
+    latency_ms = round(bot.latency * 1000)
+    await ctx.reply(f"📶 latency is {latency_ms}!", mention_author=False)
+
 # ==================== SERVER-SPECIFIC BOT PROFILE ====================
 PROFILE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 PROFILE_IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
