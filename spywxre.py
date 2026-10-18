@@ -1256,6 +1256,48 @@ async def avatar_command(ctx, user: discord.User = None):
     await ctx.reply(embed=embed, mention_author=False)
 
 
+@bot.command(name="banner")
+@commands.guild_only()
+async def banner_command(ctx, user: discord.User = None):
+    """Show a user's Discord profile banner; Premium servers only."""
+    if not await require_premium(ctx):
+        return
+
+    target = user or ctx.author
+    try:
+        # Fetch the full user profile because cached users may not include banner data.
+        fetched_user = await ctx.bot.fetch_user(target.id)
+    except discord.NotFound:
+        await ctx.reply("That user could not be found.", mention_author=False)
+        return
+    except (discord.Forbidden, discord.HTTPException):
+        await ctx.reply("I couldn't retrieve that user's banner. Please try again.", mention_author=False)
+        return
+
+    banner_asset = fetched_user.banner
+    if banner_asset is None:
+        embed = StyledEmbed(
+            title=f"✦ Banner | {discord.utils.escape_markdown(target.name)}",
+            description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\nThis user does not have a profile banner set.",
+            color=discord.Color.from_rgb(128, 0, 255),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+        await ctx.reply(embed=embed, mention_author=False)
+        return
+
+    banner_url = banner_asset.url
+    embed = StyledEmbed(
+        title=f"✦ Banner | {discord.utils.escape_markdown(target.name)}",
+        description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size banner]({banner_url})",
+        color=discord.Color.from_rgb(128, 0, 255),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_image(url=banner_url)
+    embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
 @bot.command(name="sinfo", aliases=["serverinfo", "server-info"])
 @commands.guild_only()
 async def server_info_command(ctx):
