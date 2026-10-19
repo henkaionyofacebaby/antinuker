@@ -997,10 +997,13 @@ async def update_presence():
             guild.member_count if guild.member_count is not None else len(guild.members)
             for guild in bot.guilds
         )
+        # Discord requires a valid Twitch/YouTube URL for Streaming presence.
+        # Replace this URL with your own channel if you want the activity to link there.
         await bot.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name=f"over {total_users:,} Users"
+            status=discord.Status.online,
+            activity=discord.Streaming(
+                name=f"Watching over {total_users:,} users",
+                url="https://www.youtube.com/watch?v=Os4WFOsJE_I"
             )
         )
     except discord.HTTPException:
