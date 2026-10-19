@@ -68,19 +68,163 @@ def _approved_embed_banner(user=None, guild=None):
     banner = getattr(user, "banner", None) if user else None
     return banner.url if banner else None
 
-async def _send_banner_above(ctx, banner_url=None, guild=None):
-    """Send the shared banner as a separate message before approved info embeds.
+async def _render_banner_card(embed, banner_url=None, guild=None):
+    """Render banner + embed content into one attached card image.
 
-    Discord always renders Embed.set_image() below an embed's text/fields. Sending
-    a dedicated image-only message first reproduces the banner-above-card layout.
+    Discord's native embeds always put a large image below text. This composite
+    card puts the banner above the title/body in one visual. Text is rendered
+    into the image, while any Discord view/select menu remains interactive.
     """
+    from io import BytesIO
+    from PIL import Image, ImageDraw, ImageFont
+    import textwrap
+
+    banner_url = banner_url or _approved_embed_banner(bot.user, guild=guild)
+    width = 1000
+    banner_h = 260
+    pad = 42
+    bg = (43, 45, 49)
+    purple = (35, 0, 55)
+    white = (245, 245, 248)
+    muted = (205, 198, 215)
+    accent = (125, 55, 165)
+
+    # Fetch the configured banner; use a branded purple header if unavailable.
+    banner = None
+    if banner_url and banner_url.startswith(('https://', 'http://')):
+        try:
+            timeout = aiohttp.ClientTimeout(total=12)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(banner_url) as response:
+                    if response.status == 200:
+                        raw = await response.read()
+                        banner = Image.open(BytesIO(raw)).convert('RGB')
+        except Exception:
+            banner = None
+
+    header = Image.new('RGB', (width, banner_h), purple)
+    if banner:
+        ratio = max(width / banner.width, banner_h / banner.height)
+        resized = banner.resize((int(banner.width * ratio), int(banner.height * ratio)), Image.Resampling.LANCZOS)
+        left = max(0, (resized.width - width) // 2)
+        top = max(0, (resized.height - banner_h) // 2)
+        header.paste(resized.crop((left, top, left + width, top + banner_h)), (0, 0))
+    else:
+        hd = ImageDraw.Draw(header)
+        hd.rectangle((0, 0, width, banner_h), fill=purple)
+        hd.text((pad, 72), '$pyX SECURITY', fill=white, font=ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 42) if Path('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf').exists() else ImageFont.load_default())
+        hd.text((pad, 132), 'POWERFUL ANTI-NUKE BOT  •  MADE FOR PROTECTION', fill=muted, font=ImageFont.load_default())
+
+    bold_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+    regular_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+    def font(size, bold=False):
+        path = bold_path if bold else regular_path
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            return ImageFont.load_default()
+    title_font = font(31, True)
+    body_font = font(23)
+    field_title_font = font(22, True)
+    footer_font = font(17)
+
+    # Convert embed text to readable plain text for the visual card.
+    def plain(value):
+        value = str(value or '')
+        value = value.replace('**', '').replace('__', '').replace('`', '').replace('>', '')
+        return value
+    lines = []
+    title = plain(embed.title)
+    desc = plain(embed.description)
+    fields = list(embed.fields)
+    footer = plain(embed.footer.text)
+    draw_probe = ImageDraw.Draw(Image.new('RGB', (width, 100), bg))
+    max_text_width = width - 2 * pad
+
+    def wrapped(text, fnt):
+        out = []
+        for raw_line in text.splitlines() or ['']:
+            if not raw_line:
+                out.append('')
+                continue
+            words = raw_line.split()
+            current = ''
+            for word in words:
+                candidate = f'{current} {word}'.strip()
+                if draw_probe.textbbox((0, 0), candidate, font=fnt)[2] <= max_text_width:
+                    current = candidate
+                else:
+                    if current:
+                        out.append(current)
+                    current = word
+            if current:
+                out.append(current)
+        return out
+
+    y = 0
+    body_lines = []
+    if title:
+        body_lines.append(('title', title))
+    if desc:
+        body_lines.append(('body', desc))
+    for field in fields:
+        body_lines.append(('field_title', plain(field.name)))
+        body_lines.append(('body', plain(field.value)))
+    # Estimate a card height before drawing; fields and long descriptions wrap.
+    for kind, text in body_lines:
+        fnt = title_font if kind == 'title' else field_title_font if kind == 'field_title' else body_font
+        y += len(wrapped(text, fnt)) * (42 if kind == 'title' else 33) + (14 if kind != 'body' else 8)
+    height = banner_h + max(300, y + 110)
+    image = Image.new('RGB', (width, height), bg)
+    image.paste(header, (0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, banner_h, 12, height), fill=accent)
+    y = banner_h + 35
+    for kind, text in body_lines:
+        fnt = title_font if kind == 'title' else field_title_font if kind == 'field_title' else body_font
+        color = white if kind != 'body' else muted
+        for line in wrapped(text, fnt):
+            draw.text((pad, y), line, fill=color, font=fnt)
+            y += 42 if kind == 'title' else 33
+        y += 14 if kind != 'body' else 8
+    if footer:
+        draw.line((pad, height - 62, width - pad, height - 62), fill=(80, 55, 95), width=2)
+        draw.text((pad, height - 45), footer, fill=(175, 165, 185), font=footer_font)
+
+    output = BytesIO()
+    image.save(output, format='PNG', optimize=True)
+    output.seek(0)
+    output.filename = 'pyx_banner_card.png'
+    card_embed = discord.Embed(color=discord.Color.from_rgb(35, 0, 55))
+    card_embed.set_image(url='attachment://pyx_banner_card.png')
+    return output, card_embed
+
+async def _send_banner_card(ctx, embed, view=None, banner_url=None, guild=None):
+    """Send the banner and info content as one combined visual card."""
     if banner_url is None:
         banner_url = _approved_embed_banner(bot.user, guild=guild)
     if not banner_url:
-        return None
-    banner_embed = discord.Embed(color=discord.Color.from_rgb(35, 0, 55))
-    banner_embed.set_image(url=banner_url)
-    return await ctx.send(embed=banner_embed, reference=None)
+        return await ctx.reply(embed=embed, view=view, mention_author=False)
+    try:
+        image_file, card_embed = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
+        return await ctx.reply(embed=card_embed, file=discord.File(image_file, filename='pyx_banner_card.png'), view=view, mention_author=False)
+    except Exception:
+        logging.exception('Failed to render combined banner card; falling back to native embed')
+        return await ctx.reply(embed=embed, view=view, mention_author=False)
+
+async def _edit_banner_card(interaction, embed, view, guild=None):
+    """Refresh the composite card when a help-menu dropdown changes category."""
+    try:
+        banner_url = _approved_embed_banner(bot.user, guild=guild)
+        if not banner_url:
+            return await interaction.response.edit_message(embed=embed, view=view)
+        image_file, card_embed = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
+        return await interaction.response.edit_message(
+            embed=card_embed, attachments=[discord.File(image_file, filename='pyx_banner_card.png')], view=view
+        )
+    except Exception:
+        logging.exception('Failed to refresh combined banner card; falling back to native embed')
+        return await interaction.response.edit_message(embed=embed, view=view)
 
 class StyledEmbed(_DiscordEmbed):
     """Consistent $pyX branding with readable spacing and safe defaults."""
@@ -1183,7 +1327,7 @@ class HelpCategorySelect(discord.ui.Select):
             await interaction.response.send_message("Only the person who ran `help` can use this menu.", ephemeral=True)
             return
         self.view.update_embed(self.values[0])
-        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+        await _edit_banner_card(interaction, self.view.embed, self.view, guild=getattr(self.ctx, "guild", None))
 
 
 class HelpView(discord.ui.View):
@@ -1274,8 +1418,7 @@ async def help_command(ctx):
     """Show the interactive regular server command guide."""
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
     view = HelpView(ctx, active_prefix)
-    await _send_banner_above(ctx)
-    await ctx.reply(embed=view.embed, view=view, mention_author=False)
+    await _send_banner_card(ctx, view.embed, view=view, guild=ctx.guild)
 
 class AdminHelpSelect(discord.ui.Select):
     def __init__(self, ctx, prefix):
@@ -1294,7 +1437,7 @@ class AdminHelpSelect(discord.ui.Select):
             await interaction.response.send_message("Only the person who ran `admhelp` can use this menu.", ephemeral=True)
             return
         self.view.update_embed(self.values[0])
-        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+        await _edit_banner_card(interaction, self.view.embed, self.view, guild=getattr(self.ctx, "guild", None))
 
 
 class AdminHelpView(discord.ui.View):
@@ -1365,8 +1508,7 @@ async def admin_help_command(ctx):
 
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
     view = AdminHelpView(ctx, active_prefix)
-    await _send_banner_above(ctx)
-    await ctx.reply(embed=view.embed, view=view, mention_author=False)
+    await _send_banner_card(ctx, view.embed, view=view, guild=ctx.guild)
 
 @bot.command(name="av", aliases=["avatar", "pfp"])
 @commands.guild_only()
@@ -1485,9 +1627,8 @@ async def server_info_command(ctx):
     )
     embed.add_field(name="🆔 Server ID", value=f"`{guild.id}`", inline=False)
     banner_url = _approved_embed_banner(bot.user, guild=guild)
-    await _send_banner_above(ctx, banner_url=banner_url)
     embed.set_footer(text=f"✦ $pyX Security • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-    await ctx.reply(embed=embed, mention_author=False)
+    await _send_banner_card(ctx, embed, banner_url=banner_url, guild=guild)
 
 
 class BotInfoCategorySelect(discord.ui.Select):
@@ -1507,7 +1648,7 @@ class BotInfoCategorySelect(discord.ui.Select):
             await interaction.response.send_message("Only the person who ran the command can use this menu.", ephemeral=True)
             return
         self.view.update_embed(self.values[0])
-        await interaction.response.edit_message(embed=self.view.embed, view=self.view)
+        await _edit_banner_card(interaction, self.view.embed, self.view, guild=getattr(self.ctx, "guild", None))
 
 
 class BotInfoView(discord.ui.View):
@@ -1551,8 +1692,7 @@ async def bot_info_command(ctx):
     if bot.user is None:
         return await ctx.reply("Bot info is not available yet.", mention_author=False)
     view = BotInfoView(ctx)
-    await _send_banner_above(ctx)
-    await ctx.reply(embed=view.embed, view=view, mention_author=False)
+    await _send_banner_card(ctx, view.embed, view=view, guild=ctx.guild)
 
 
 @bot.command(name="ping")
