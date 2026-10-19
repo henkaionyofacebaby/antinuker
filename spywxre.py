@@ -58,6 +58,16 @@ def _decorate_embed_label(value, prefix):
         return value
     return f"{prefix} {value}"
 
+def _approved_embed_banner(user=None, guild=None):
+    """Return the configured/banner URL only for the four approved info menus."""
+    configured = os.getenv("EMBED_BANNER_URL", "").strip()
+    if configured.startswith("https://"):
+        return configured
+    if guild is not None and getattr(guild, "banner", None):
+        return guild.banner.url
+    banner = getattr(user, "banner", None) if user else None
+    return banner.url if banner else None
+
 class StyledEmbed(_DiscordEmbed):
     """Consistent $pyX branding with readable spacing and safe defaults."""
     def __init__(self, *args, **kwargs):
@@ -73,14 +83,8 @@ class StyledEmbed(_DiscordEmbed):
         super().__init__(*args, **kwargs)
         bot_obj = globals().get("bot")
         user = getattr(bot_obj, "user", None) if bot_obj else None
-        # Optional shared banner used as the default image on embeds.
-        # Set EMBED_BANNER_URL in the host environment to a direct HTTPS image URL.
-        # Commands that call set_image() later (e.g. avatar/banner lookups) replace it.
-        configured_banner = os.getenv("EMBED_BANNER_URL", "").strip()
-        bot_banner = getattr(user, "banner", None) if user else None
-        default_banner_url = configured_banner or (bot_banner.url if bot_banner else None)
-        if default_banner_url and not self.image.url:
-            self.set_image(url=default_banner_url)
+        # Shared banners are intentionally NOT applied globally. Only the help,
+        # admin-help, server-info, and bot-info views add a banner explicitly.
         if not self.author.name:
             self.set_author(
                 name="$pyX Security",
@@ -522,13 +526,30 @@ async def send_log(guild, title, description, color=None):
         return
     if guild.me and not channel.permissions_for(guild.me).send_messages:
         return
+    # Compact, readable audit-log layout: clear title, subtle divider, and
+    # consistently marked detail rows. Keep mentions/IDs and original values.
+    raw_description = _clean_embed_text(description or "")
+    detail_lines = []
+    for raw_line in raw_description.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Normalize existing markdown label lines without rewriting their data.
+        if line.startswith(("• ", "▸ ", "› ", "╰・", "├・", "╭・")):
+            line = re.sub(r"^(?:• |▸ |› |╰・|├・|╭・)", "", line)
+        if line.startswith("**") and ":**" in line:
+            line = "▸ " + line
+        elif not line.startswith(("▸ ", "• ", "`", "<", "**")):
+            line = "▸ " + line
+        detail_lines.append(line)
+    formatted_description = "\n".join(detail_lines)[:4000] or "▸ No additional details were provided."
     embed = StyledEmbed(
         title=title,
-        description=description[:4000],
+        description=formatted_description,
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text="$pyX Security")
+    embed.set_footer(text="$pyX Security • Security Logs")
     try:
         await channel.send(embed=embed)
     except discord.HTTPException:
@@ -953,10 +974,14 @@ async def on_ready():
     await update_presence()
 async def update_presence():
     try:
+        # Sum cached member counts across every connected guild. Discord users
+        # who belong to multiple shared servers may be counted more than once;
+        # this is the total across servers, not a unique-user estimate.
+        total_users = sum(guild.member_count or len(guild.members) for guild in bot.guilds)
         await bot.change_presence(
-            activity=discord.Streaming(
-                name=f"Protecting {len(bot.guilds)} Servers",
-                url="https://www.twitch.tv/discord"
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"over {total_users:,} Users"
             )
         )
     except discord.HTTPException:
@@ -1014,6 +1039,24 @@ async def on_member_remove(member):
         f"**User:** {member} (`{member.id}`)\n**Member Count:** {member.guild.member_count or 'Unknown'}",
         discord.Color.orange()
     )
+
+@bot.event
+async def on_member_update(before, after):
+    """Log member role changes in a compact, readable security-log embed."""
+    if before.roles == after.roles:
+        return
+    before_ids = {role.id for role in before.roles}
+    after_ids = {role.id for role in after.roles}
+    added = [role for role in after.roles if role.id not in before_ids and role.name != "@everyone"]
+    removed = [role for role in before.roles if role.id not in after_ids and role.name != "@everyone"]
+    if not added and not removed:
+        return
+    lines = [f"**User:** {after.mention} (`{after.id}`)"]
+    if added:
+        lines.append("**Added Roles:** " + ", ".join(role.mention for role in added))
+    if removed:
+        lines.append("**Removed Roles:** " + ", ".join(role.mention for role in removed))
+    await send_log(after.guild, "◇ Member Roles Updated", "\n".join(lines), discord.Color.blurple())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -1188,9 +1231,9 @@ class HelpView(discord.ui.View):
                                  timestamp=discord.utils.utcnow())
         if bot.user:
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
-            banner = getattr(bot.user, "banner", None)
-            if banner:
-                self.embed.set_image(url=banner.url)
+            banner_url = _approved_embed_banner(bot.user)
+            if banner_url:
+                self.embed.set_image(url=banner_url)
             self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, HelpCategorySelect):
@@ -1269,6 +1312,9 @@ class AdminHelpView(discord.ui.View):
                                  timestamp=discord.utils.utcnow())
         if bot.user:
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
+            banner_url = _approved_embed_banner(bot.user)
+            if banner_url:
+                self.embed.set_image(url=banner_url)
             self.embed.set_footer(text="$pyX Security • Restricted Staff Help", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, AdminHelpSelect):
@@ -1411,10 +1457,9 @@ async def server_info_command(ctx):
         inline=False
     )
     embed.add_field(name="🆔 Server ID", value=f"`{guild.id}`", inline=False)
-    if guild.banner:
-        embed.set_image(url=guild.banner.url)
-    elif bot.user and getattr(bot.user, "banner", None):
-        embed.set_image(url=bot.user.banner.url)
+    banner_url = _approved_embed_banner(bot.user, guild=guild)
+    if banner_url:
+        embed.set_image(url=banner_url)
     embed.set_footer(text=f"✦ $pyX Security • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -1456,21 +1501,22 @@ class BotInfoView(discord.ui.View):
         uptime_minutes, uptime_secs = divmod(remainder, 60)
         uptime_text = f"{uptime_days}d {uptime_hours}h {uptime_minutes}m {uptime_secs}s"
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
+        total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("✦ $pyX Security | Bot Information", f"╭・**Powerful Discord Server Protection**\n│ Developed by **SPYWXRE**\n│ Built for server safety and moderation\n╰・Choose a category below to explore the bot.\n\n**Live Status**\n> 📶 Gateway latency: **{latency_text}**\n> 🌐 Servers: **{len(bot.guilds):,}**\n> ⏱️ Uptime: **{uptime_text}**"),
-            "security": ("🛡️ Server Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
-            "moderation": ("🔨 Moderation & Controls", "• Kick and ban members\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
-            "backups": ("💾 Backups, Logs & Customization", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
-            "stats": ("◈ Live Bot Statistics", f"╭・**Connection**\n│ 📶 Gateway latency: **{latency_text}**\n│ 🟢 Status: **{'Online' if bot.is_ready() else 'Connecting'}**\n│ ⏱️ Uptime: **{uptime_text}**\n╰・\n**╭・Network & Usage**\n│ 🌐 Servers: `{len(bot.guilds):,}`\n│ 👥 Users: `{sum(g.member_count or 0 for g in bot.guilds):,}` *(approximate; users across servers may overlap)*\n│ ⌘ Prefix commands: `{len(bot.commands):,}`\n│ ⚙ Slash commands: `{len(bot.tree.get_commands()):,}`\n│ 🆔 Bot ID: `{bot_user.id if bot_user else 'Unavailable'}`\n╰・"),
+            "home": ("✦ $pyX Security", f"• **Latency:** `{latency_text}`\n• **Uptime:** `{uptime_text}`\n• **Users:** `{total_users:,}`\n• **Servers:** `{len(bot.guilds):,}`\n\n> ✦ Built for server protection, moderation, and reliable security tools.\n> Developed by **SPYWXRE**\n\nChoose a category from the menu below to explore the bot."),
+            "security": ("⛨ Server Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
+            "moderation": ("⚔ Moderation & Controls", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
+            "backups": ("⌘ Backups, Logs & Customization", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
+            "stats": ("◈ Live Bot Statistics", f"• **Latency:** `{latency_text}`\n• **Uptime:** `{uptime_text}`\n• **Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n• **Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n• **Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
         }
         title, description = labels.get(category, labels["home"])
         self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
         if bot_user:
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
-            banner = getattr(bot_user, "banner", None)
-            if banner:
-                self.embed.set_image(url=banner.url)
-            self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
+            banner_url = _approved_embed_banner(bot_user)
+            if banner_url:
+                self.embed.set_image(url=banner_url)
+            self.embed.set_footer(text="✦ $pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
         for item in self.children:
             if isinstance(item, BotInfoCategorySelect):
                 for option in item.options:
@@ -1536,8 +1582,10 @@ async def read_profile_image(ctx, image_url=None):
                 if response.status != 200:
                     raise ValueError(f"The image URL returned HTTP {response.status}.")
                 content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
-                if content_type not in PROFILE_IMAGE_TYPES:
-                    raise ValueError("The URL must point directly to a PNG, JPG/JPEG, GIF, or WEBP image.")
+                # Some image hosts (including Discord CDN proxies) return a generic
+                # content type. Validate the actual file signature below instead.
+                if content_type and content_type.startswith("text/"):
+                    raise ValueError("That URL returned a web page, not an image. Use a direct image URL or attach the file.")
                 declared_size = response.headers.get("Content-Length")
                 if declared_size and declared_size.isdigit() and int(declared_size) > PROFILE_IMAGE_MAX_BYTES:
                     raise ValueError("Image must be 8 MB or smaller.")
@@ -1587,7 +1635,24 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
             "/guilds/{guild_id}/members/@me",
             guild_id=ctx.guild.id,
         )
-        await bot.http.request(route, json={field_name: image_data_uri})
+        try:
+            await bot.http.request(route, json={field_name: image_data_uri})
+        except discord.HTTPException as first_error:
+            # If Discord rejects a GIF banner format, retry as a PNG first frame.
+            # Animated banners may not be accepted for every account/server profile.
+            if field_name != "banner" or not image_data.startswith((b"GIF87a", b"GIF89a")):
+                raise
+            try:
+                from io import BytesIO
+                from PIL import Image
+                with Image.open(BytesIO(image_data)) as gif_image:
+                    gif_image.seek(0)
+                    converted = BytesIO()
+                    gif_image.convert("RGBA").save(converted, format="PNG")
+                    png_data = converted.getvalue()
+                await bot.http.request(route, json={field_name: discord.utils._bytes_to_base64_data(png_data)})
+            except ImportError:
+                raise first_error
         if field_name == "banner":
             label = "Server-specific profile banner"
         else:
@@ -2290,6 +2355,59 @@ async def timeout_command(ctx, target: str, duration: str, *, reason="No reason 
             embed=role_embed("Timeout Failed", "╰・Discord couldn't apply the timeout. Please try again.", discord.Color.red()),
             mention_author=False,
         )
+
+
+@bot.command(name="untimeout", aliases=["unmute", "removetimeout"])
+@commands.guild_only()
+@commands.check(lambda ctx: has_admin_access(ctx.author))
+async def untimeout_command(ctx, target: str, *, reason="Timeout removed by moderator"):
+    """Remove a member's active timeout using a mention or numeric user ID."""
+    raw = target.strip()
+    match = re.fullmatch(r"<@!?(\d+)>", raw)
+    raw_id = match.group(1) if match else (raw if raw.isdigit() else None)
+    member = None
+    if raw_id:
+        member = ctx.guild.get_member(int(raw_id))
+        if member is None:
+            try:
+                member = await ctx.guild.fetch_member(int(raw_id))
+            except discord.NotFound:
+                member = None
+            except discord.HTTPException:
+                return await ctx.reply(embed=role_embed("Member Lookup Failed", "╰・Discord couldn't look up that member. Please try again.", discord.Color.red()), mention_author=False)
+    else:
+        try:
+            member = await commands.MemberConverter().convert(ctx, raw)
+        except commands.MemberNotFound:
+            member = None
+    if member is None:
+        return await ctx.reply(embed=role_embed(
+            "Member Not Found", "╭・I couldn't find that member in this server.\n╰・Use a mention or numeric user ID.\n\n◇ Usage: `!untimeout <@user/user ID> [reason]`", discord.Color.red()
+        ), mention_author=False)
+    if member.id == ctx.guild.owner_id or (not is_bot_admin_id(ctx.author.id) and member.top_role >= ctx.author.top_role):
+        return await ctx.reply(embed=role_embed(
+            "Cannot Remove Timeout", "╰・You can't remove a timeout from the server owner or a member with an equal/higher role.", discord.Color.red()
+        ), mention_author=False)
+    try:
+        if member.timed_out_until is None:
+            return await ctx.reply(embed=role_embed(
+                "No Active Timeout", f"╰・**{discord.utils.escape_markdown(member.name)}** does not currently have an active timeout.", discord.Color.orange()
+            ), mention_author=False)
+        await member.timeout(None, reason=f"{ctx.author} ({ctx.author.id}): {reason}")
+        embed = role_embed(
+            "Timeout Removed",
+            f"╭・**User:** {discord.utils.escape_markdown(member.name)}\n"
+            f"├・**User ID:** `{member.id}`\n"
+            f"├・**Reason:** {discord.utils.escape_markdown(reason)}\n"
+            f"╰・**Moderator:** {discord.utils.escape_markdown(ctx.author.name)}",
+            discord.Color.from_rgb(128, 0, 255),
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+        await send_log(ctx.guild, "Member timeout removed", f"Timeout removed from {member} (`{member.id}`) by {ctx.author} (`{ctx.author.id}`).\nReason: {reason}", discord.Color.green())
+    except discord.Forbidden:
+        await ctx.reply(embed=role_embed("Remove Timeout Failed", "╰・I need **Moderate Members** permission, and my role must be above the target's role.", discord.Color.red()), mention_author=False)
+    except discord.HTTPException:
+        await ctx.reply(embed=role_embed("Remove Timeout Failed", "╰・Discord couldn't remove the timeout. Please try again.", discord.Color.red()), mention_author=False)
 
 
 @bot.command(name="ban")
@@ -4814,6 +4932,8 @@ async def on_command_error(ctx, error):
             "kick": "`!kick <@user/user ID> [reason]`",
             "timeout": "`!timeout <@user/user ID> <1min/1d/1w> [reason]`",
             "mute": "`!timeout <@user/user ID> <1min/1d/1w> [reason]`",
+            "untimeout": "`!untimeout <@user/user ID> [reason]`",
+            "unmute": "`!untimeout <@user/user ID> [reason]`",
         }.get(command_name, f"`{ctx.prefix}{command_name} ...`")
         embed = role_embed(
             "Missing Command Details",
