@@ -24,7 +24,7 @@ import aiohttp
 from datetime import timedelta
 from collections import defaultdict, deque
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 
 # ==================== EMBED STYLE ====================
@@ -67,6 +67,20 @@ def _approved_embed_banner(user=None, guild=None):
         return guild.banner.url
     banner = getattr(user, "banner", None) if user else None
     return banner.url if banner else None
+
+async def _send_banner_above(ctx, banner_url=None, guild=None):
+    """Send the shared banner as a separate message before approved info embeds.
+
+    Discord always renders Embed.set_image() below an embed's text/fields. Sending
+    a dedicated image-only message first reproduces the banner-above-card layout.
+    """
+    if banner_url is None:
+        banner_url = _approved_embed_banner(bot.user, guild=guild)
+    if not banner_url:
+        return None
+    banner_embed = discord.Embed(color=discord.Color.from_rgb(35, 0, 55))
+    banner_embed.set_image(url=banner_url)
+    return await ctx.send(embed=banner_embed, reference=None)
 
 class StyledEmbed(_DiscordEmbed):
     """Consistent $pyX branding with readable spacing and safe defaults."""
@@ -972,12 +986,17 @@ async def on_ready():
         except Exception:
             logger.exception("Slash command sync failed; it can retry on next reconnect")
     await update_presence()
+    if not presence_refresh_loop.is_running():
+        presence_refresh_loop.start()
+
 async def update_presence():
     try:
-        # Sum cached member counts across every connected guild. Discord users
-        # who belong to multiple shared servers may be counted more than once;
-        # this is the total across servers, not a unique-user estimate.
-        total_users = sum(guild.member_count or len(guild.members) for guild in bot.guilds)
+        # Sum member counts across all connected guilds. Members shared by
+        # multiple guilds are counted once per guild (combined membership).
+        total_users = sum(
+            guild.member_count if guild.member_count is not None else len(guild.members)
+            for guild in bot.guilds
+        )
         await bot.change_presence(
             activity=discord.Activity(
                 type=discord.ActivityType.watching,
@@ -986,6 +1005,15 @@ async def update_presence():
         )
     except discord.HTTPException:
         logger.exception("Presence update failed")
+
+@tasks.loop(minutes=10)
+async def presence_refresh_loop():
+    await update_presence()
+
+@presence_refresh_loop.before_loop
+async def before_presence_refresh_loop():
+    await bot.wait_until_ready()
+
 @bot.event
 async def on_guild_join(guild):
     await snapshot_guild(guild)
@@ -1231,9 +1259,6 @@ class HelpView(discord.ui.View):
                                  timestamp=discord.utils.utcnow())
         if bot.user:
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
-            banner_url = _approved_embed_banner(bot.user)
-            if banner_url:
-                self.embed.set_image(url=banner_url)
             self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, HelpCategorySelect):
@@ -1246,6 +1271,7 @@ async def help_command(ctx):
     """Show the interactive regular server command guide."""
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
     view = HelpView(ctx, active_prefix)
+    await _send_banner_above(ctx)
     await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
 class AdminHelpSelect(discord.ui.Select):
@@ -1312,9 +1338,6 @@ class AdminHelpView(discord.ui.View):
                                  timestamp=discord.utils.utcnow())
         if bot.user:
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
-            banner_url = _approved_embed_banner(bot.user)
-            if banner_url:
-                self.embed.set_image(url=banner_url)
             self.embed.set_footer(text="$pyX Security • Restricted Staff Help", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, AdminHelpSelect):
@@ -1339,6 +1362,7 @@ async def admin_help_command(ctx):
 
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
     view = AdminHelpView(ctx, active_prefix)
+    await _send_banner_above(ctx)
     await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
 @bot.command(name="av", aliases=["avatar", "pfp"])
@@ -1458,8 +1482,7 @@ async def server_info_command(ctx):
     )
     embed.add_field(name="🆔 Server ID", value=f"`{guild.id}`", inline=False)
     banner_url = _approved_embed_banner(bot.user, guild=guild)
-    if banner_url:
-        embed.set_image(url=banner_url)
+    await _send_banner_above(ctx, banner_url=banner_url)
     embed.set_footer(text=f"✦ $pyX Security • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await ctx.reply(embed=embed, mention_author=False)
 
@@ -1513,9 +1536,6 @@ class BotInfoView(discord.ui.View):
         self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
         if bot_user:
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
-            banner_url = _approved_embed_banner(bot_user)
-            if banner_url:
-                self.embed.set_image(url=banner_url)
             self.embed.set_footer(text="✦ $pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
         for item in self.children:
             if isinstance(item, BotInfoCategorySelect):
@@ -1528,6 +1548,7 @@ async def bot_info_command(ctx):
     if bot.user is None:
         return await ctx.reply("Bot info is not available yet.", mention_author=False)
     view = BotInfoView(ctx)
+    await _send_banner_above(ctx)
     await ctx.reply(embed=view.embed, view=view, mention_author=False)
 
 
