@@ -61,12 +61,10 @@ def _arrow_lines(value):
         stripped = line.strip()
         if not stripped:
             lines.append("")
-        elif stripped.startswith("˃"):
+        elif stripped.startswith("➤"):
             lines.append(stripped)
-        elif stripped.startswith("➔"):
-            lines.append("˃" + stripped[1:])
         else:
-            lines.append(f"˃ {stripped}")
+            lines.append(f"➤ {stripped}")
     return "\n".join(lines)
 
 def _decorate_embed_label(value, prefix):
@@ -147,13 +145,8 @@ class StyledEmbed(_DiscordEmbed):
         super().__init__(*args, **kwargs)
         bot_obj = globals().get("bot")
         user = getattr(bot_obj, "user", None) if bot_obj else None
-        # Keep ordinary command embeds free of the repeated bot-name/avatar header.
-        # The help, admin-help, and bot-info views add that header explicitly.
-        if not self.footer.text:
-            self.set_footer(
-                text="$pyX Security • Developed by SPYWXRE",
-                icon_url=user.display_avatar.url if user else None,
-            )
+        # Ordinary command embeds stay minimal: no repeated bot-name/developer footer.
+        # Help and information views add their own branding explicitly where needed.
 
     def add_field(self, *, name, value, inline=True):
         name = _clean_embed_text(name)
@@ -589,7 +582,7 @@ async def send_log(guild, title, description, color=None):
     # Keep the requested arrow-style event logs clean and aligned. Other
     # existing security logs retain their established compact formatting.
     raw_description = _clean_embed_text(description or "")
-    if title.startswith("➔ "):
+    if title.startswith("➤ "):
         formatted_description = raw_description[:4000] or "No additional details were provided."
     else:
         detail_lines = []
@@ -1087,7 +1080,7 @@ async def on_message_edit(before, after):
     after_text = after.content.strip() or "[empty message]"
     await send_log(
         after.guild,
-        "➔ Message Edited",
+        "➤ Message Edited",
         f"**Before** {before_text[:1500]}\n\n"
         f"**After** {after_text[:1500]}\n\n"
         f"**Channel** **Text** {after.channel.mention}",
@@ -1097,7 +1090,7 @@ async def on_message_edit(before, after):
 async def on_guild_channel_delete(channel):
     await send_log(
         channel.guild,
-        "➔ Channel Deleted",
+        "➤ Channel Deleted",
         f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}",
     )
     try:
@@ -1113,7 +1106,7 @@ async def on_invite_create(invite):
     inviter = invite.inviter.mention if invite.inviter else "Unknown user"
     await send_log(
         guild,
-        "➔ Invite Created",
+        "➤ Invite Created",
         f"`{invite.code}` by **{inviter}**",
     )
 
@@ -1195,7 +1188,7 @@ async def on_voice_state_update(member, before, after):
     await send_log(member.guild, title, detail, color)
 @bot.event
 async def on_guild_channel_create(channel):
-    await send_log(channel.guild, "➔ Channel Created", f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}")
+    await send_log(channel.guild, "➤ Channel Created", f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}")
     # Refresh only the changed channel instead of rebuilding the whole guild snapshot.
     try:
         guild = channel.guild
@@ -3191,7 +3184,7 @@ async def whitelist_add(ctx, member: discord.Member):
     save_config()
     await send_log(
         ctx.guild,
-        "➔ Server Whitelist Added",
+        "➤ Server Whitelist Added",
         f"{member.mention} (`{member.id}`) added by {ctx.author.mention} (`{ctx.author.id}`).",
     )
     await ctx.reply(
@@ -3217,7 +3210,7 @@ async def whitelist_remove(ctx, member: discord.Member):
     save_config()
     await send_log(
         ctx.guild,
-        "➔ Server Whitelist Removed",
+        "➤ Server Whitelist Removed",
         f"{member.mention} (`{member.id}`) removed by {ctx.author.mention} (`{ctx.author.id}`).",
     )
     await ctx.reply(
@@ -4166,7 +4159,7 @@ async def slash_whitelist(
         save_config()
         await send_log(
             guild,
-            "➔ Server Whitelist Added",
+            "➤ Server Whitelist Added",
             f"{user.mention} (`{user.id}`) added by {interaction.user.mention} (`{interaction.user.id}`).",
         )
         return await interaction.response.send_message(
@@ -4187,7 +4180,7 @@ async def slash_whitelist(
     save_config()
     await send_log(
         guild,
-        "➔ Server Whitelist Removed",
+        "➤ Server Whitelist Removed",
         f"{user.mention} (`{user.id}`) removed by {interaction.user.mention} (`{interaction.user.id}`).",
     )
     await interaction.response.send_message(
