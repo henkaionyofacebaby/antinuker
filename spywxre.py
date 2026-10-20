@@ -120,18 +120,24 @@ class StyledEmbed(_DiscordEmbed):
         # Madoka-style clean embeds: omit the colored side accent entirely.
         kwargs["color"] = None
         # Keep command embeds minimal: no automatic title decoration.
+        title = kwargs.get("title")
+        if isinstance(title, str):
+            # Retain the bot-name header only on the main help/info pages.
+            normalized_title = title.lower()
+            keep_brand = any(token in normalized_title for token in (
+                "help", "about", "information", " bot info", "server info", "sinfo"
+            ))
+            if not keep_brand and "$pyx security" in normalized_title:
+                title = re.sub(r"(?i)\$pyX Security\s*\|?\s*", "", title).strip(" |—-")
+                title = re.sub(r"^[^\w$]+\s*", "", title).strip()
+                kwargs["title"] = title or "Details"
         if isinstance(kwargs.get("description"), str):
             kwargs["description"] = _clean_embed_text(kwargs["description"])
         super().__init__(*args, **kwargs)
         bot_obj = globals().get("bot")
         user = getattr(bot_obj, "user", None) if bot_obj else None
-        # Shared banners are intentionally NOT applied globally. Only the help,
-        # admin-help, server-info, and bot-info views add a banner explicitly.
-        if not self.author.name:
-            self.set_author(
-                name="$pyX Security",
-                icon_url=user.display_avatar.url if user else None,
-            )
+        # Keep ordinary command embeds free of the repeated bot-name/avatar header.
+        # The help, admin-help, and bot-info views add that header explicitly.
         if not self.footer.text:
             self.set_footer(
                 text="$pyX Security • Developed by SPYWXRE",
@@ -431,6 +437,7 @@ intents.members = True
 intents.moderation = True
 intents.message_content = True
 intents.webhooks = True
+intents.invites = True
 async def get_command_prefix(client, message):
     """Return this server's saved prefix, or the default prefix outside a server."""
     if message.guild is None:
@@ -568,23 +575,25 @@ async def send_log(guild, title, description, color=None):
         return
     if guild.me and not channel.permissions_for(guild.me).send_messages:
         return
-    # Compact, readable audit-log layout: clear title, subtle divider, and
-    # consistently marked detail rows. Keep mentions/IDs and original values.
+    # Keep the requested arrow-style event logs clean and aligned. Other
+    # existing security logs retain their established compact formatting.
     raw_description = _clean_embed_text(description or "")
-    detail_lines = []
-    for raw_line in raw_description.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # Normalize existing markdown label lines without rewriting their data.
-        if line.startswith(("• ", "▸ ", "› ", "╰・", "├・", "╭・")):
-            line = re.sub(r"^(?:• |▸ |› |╰・|├・|╭・)", "", line)
-        if line.startswith("**") and ":**" in line:
-            line = "▸ " + line
-        elif not line.startswith(("▸ ", "• ", "`", "<", "**")):
-            line = "▸ " + line
-        detail_lines.append(line)
-    formatted_description = "\n".join(detail_lines)[:4000] or "▸ No additional details were provided."
+    if title.startswith("➔ "):
+        formatted_description = raw_description[:4000] or "No additional details were provided."
+    else:
+        detail_lines = []
+        for raw_line in raw_description.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(("• ", "▸ ", "› ", "╰・", "├・", "╭・")):
+                line = re.sub(r"^(?:• |▸ |› |╰・|├・|╭・)", "", line)
+            if line.startswith("**") and ":**" in line:
+                line = "▸ " + line
+            elif not line.startswith(("▸ ", "• ", "`", "<", "**")):
+                line = "▸ " + line
+            detail_lines.append(line)
+        formatted_description = "\n".join(detail_lines)[:4000] or "▸ No additional details were provided."
     embed = StyledEmbed(
         title=title,
         description=formatted_description,
@@ -1059,6 +1068,45 @@ async def on_audit_log_entry_create(entry):
     except Exception:
         logger.exception("Audit log processing failed")
 @bot.event
+async def on_message_edit(before, after):
+    # Message edits are logged only when the message text actually changed.
+    if after.guild is None or after.author.bot or before.content == after.content:
+        return
+    before_text = before.content.strip() or "[empty message]"
+    after_text = after.content.strip() or "[empty message]"
+    await send_log(
+        after.guild,
+        "➔ Message Edited",
+        f"**Before** {before_text[:1500]}\n\n"
+        f"**After** {after_text[:1500]}\n\n"
+        f"**Channel** **Text** {after.channel.mention}",
+    )
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    await send_log(
+        channel.guild,
+        "➔ Channel Deleted",
+        f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}",
+    )
+    try:
+        channel_snapshots.get(channel.guild.id, {}).pop(channel.id, None)
+    except Exception:
+        logger.exception("Could not update channel snapshot after deletion")
+
+@bot.event
+async def on_invite_create(invite):
+    guild = invite.guild
+    if guild is None:
+        return
+    inviter = invite.inviter.mention if invite.inviter else "Unknown user"
+    await send_log(
+        guild,
+        "➔ Invite Created",
+        f"`{invite.code}` by **{inviter}**",
+    )
+
+@bot.event
 async def on_member_join(member):
     # Log every member join independently from raid-protection settings.
     account_age = discord.utils.utcnow() - member.created_at
@@ -1136,7 +1184,7 @@ async def on_voice_state_update(member, before, after):
     await send_log(member.guild, title, detail, color)
 @bot.event
 async def on_guild_channel_create(channel):
-    await send_log(channel.guild, "📁 Channel Created", f"**Name:** {channel.name}\n**ID:** `{channel.id}`\n**Type:** `{channel.type}`", discord.Color.green())
+    await send_log(channel.guild, "➔ Channel Created", f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}")
     # Refresh only the changed channel instead of rebuilding the whole guild snapshot.
     try:
         guild = channel.guild
@@ -1288,6 +1336,7 @@ class HelpView(discord.ui.View):
                                  color=discord.Color.from_rgb(35, 0, 55),
                                  timestamp=discord.utils.utcnow())
         if bot.user:
+            self.embed.set_author(name="$pyX Security", icon_url=bot.user.display_avatar.url)
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
             self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
         for item in self.children:
@@ -1367,6 +1416,7 @@ class AdminHelpView(discord.ui.View):
                                  color=discord.Color.from_rgb(35, 0, 55),
                                  timestamp=discord.utils.utcnow())
         if bot.user:
+            self.embed.set_author(name="$pyX Security", icon_url=bot.user.display_avatar.url)
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
             self.embed.set_footer(text="$pyX Security • Restricted Staff Help", icon_url=bot.user.display_avatar.url)
         for item in self.children:
@@ -1564,6 +1614,7 @@ class BotInfoView(discord.ui.View):
         description = _arrow_lines(description)
         self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
         if bot_user:
+            self.embed.set_author(name="$pyX Security", icon_url=bot_user.display_avatar.url)
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
             self.embed.set_footer(text="🛡️ $pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
         for item in self.children:
@@ -3127,6 +3178,11 @@ async def whitelist_add(ctx, member: discord.Member):
         )
     user_ids.append(member.id)
     save_config()
+    await send_log(
+        ctx.guild,
+        "➔ Server Whitelist Added",
+        f"{member.mention} (`{member.id}`) added by {ctx.author.mention} (`{ctx.author.id}`).",
+    )
     await ctx.reply(
         "User added to whitelist.",
         mention_author=False
@@ -3148,6 +3204,11 @@ async def whitelist_remove(ctx, member: discord.Member):
     if not user_ids:
         guild_whitelists.pop(guild_key, None)
     save_config()
+    await send_log(
+        ctx.guild,
+        "➔ Server Whitelist Removed",
+        f"{member.mention} (`{member.id}`) removed by {ctx.author.mention} (`{ctx.author.id}`).",
+    )
     await ctx.reply(
         "User removed from whitelist.",
         mention_author=False
@@ -4092,6 +4153,11 @@ async def slash_whitelist(
         user_ids.append(user.id)
         guild_whitelists[guild_key] = user_ids
         save_config()
+        await send_log(
+            guild,
+            "➔ Server Whitelist Added",
+            f"{user.mention} (`{user.id}`) added by {interaction.user.mention} (`{interaction.user.id}`).",
+        )
         return await interaction.response.send_message(
             "User added to whitelist.",
             ephemeral=True
@@ -4108,6 +4174,11 @@ async def slash_whitelist(
     else:
         guild_whitelists.pop(guild_key, None)
     save_config()
+    await send_log(
+        guild,
+        "➔ Server Whitelist Removed",
+        f"{user.mention} (`{user.id}`) removed by {interaction.user.mention} (`{interaction.user.id}`).",
+    )
     await interaction.response.send_message(
         "User removed from whitelist.",
         ephemeral=True
@@ -4979,7 +5050,7 @@ async def on_command_error(ctx, error):
         missing = getattr(error, "param", None)
         missing_name = getattr(missing, "name", "argument")
         embed = StyledEmbed(
-            title="➔ Error",
+            title="⚒ Error",
             description=f"Missing argument: `{missing_name}`. Use `{ctx.prefix}help {command_name}` for usage.",
         )
         return await ctx.reply(embed=embed, mention_author=False)
