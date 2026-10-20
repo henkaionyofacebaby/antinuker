@@ -20,6 +20,7 @@ import logging
 import re
 import secrets
 import string
+from pathlib import Path
 import aiohttp
 from datetime import timedelta
 from collections import defaultdict, deque
@@ -203,8 +204,9 @@ async def _send_banner_card(ctx, embed, view=None, banner_url=None, guild=None):
     """Send the banner and info content as one combined visual card."""
     if banner_url is None:
         banner_url = _approved_embed_banner(bot.user, guild=guild)
-    if not banner_url:
-        return await ctx.reply(embed=embed, view=view, mention_author=False)
+    # Always render a combined card. If no external banner URL is configured,
+    # _render_banner_card creates the branded purple header instead of silently
+    # reverting to Discord's native image-below-text layout.
     try:
         image_file, card_embed = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
         return await ctx.reply(embed=card_embed, file=discord.File(image_file, filename='pyx_banner_card.png'), view=view, mention_author=False)
@@ -216,8 +218,6 @@ async def _edit_banner_card(interaction, embed, view, guild=None):
     """Refresh the composite card when a help-menu dropdown changes category."""
     try:
         banner_url = _approved_embed_banner(bot.user, guild=guild)
-        if not banner_url:
-            return await interaction.response.edit_message(embed=embed, view=view)
         image_file, card_embed = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
         return await interaction.response.edit_message(
             embed=card_embed, attachments=[discord.File(image_file, filename='pyx_banner_card.png')], view=view
