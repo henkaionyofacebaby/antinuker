@@ -1243,14 +1243,14 @@ class HelpCategorySelect(discord.ui.Select):
     def __init__(self, ctx, prefix):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="Start", value="home", emoji="☭", description="Overview of $pyX Security", default=True),
-            discord.SelectOption(label="Moderation", value="moderation", emoji="➔", description="Kick, ban, purge, and channel controls"),
-            discord.SelectOption(label="Roles", value="roles", emoji="➔", description="Manage member roles"),
-            discord.SelectOption(label="Protection", value="protection", emoji="➔", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
-            discord.SelectOption(label="Backups & Logs", value="backups", emoji="➔", description="Backups and security logging"),
-            discord.SelectOption(label="Information", value="utilities", emoji="➔", description="Bot/server information and utility commands"),
-            discord.SelectOption(label="Premium", value="premium", emoji="➔", description="Premium customization commands"),
-            discord.SelectOption(label="Configuration", value="configuration", emoji="➔", description="Prefix and help commands"),
+            discord.SelectOption(label="Start", value="home", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Moderation", value="moderation", description="Kick, ban, purge, and channel controls"),
+            discord.SelectOption(label="Roles", value="roles", description="Manage member roles"),
+            discord.SelectOption(label="Protection", value="protection", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
+            discord.SelectOption(label="Backups & Logs", value="backups", description="Backups and security logging"),
+            discord.SelectOption(label="Information", value="utilities", description="Bot/server information and utility commands"),
+            discord.SelectOption(label="Premium", value="premium", description="Premium customization commands"),
+            discord.SelectOption(label="Configuration", value="configuration", description="Prefix and help commands"),
         ]
         super().__init__(placeholder="Choose a category", min_values=1, max_values=1, options=options)
 
@@ -1357,10 +1357,10 @@ class AdminHelpSelect(discord.ui.Select):
         self.ctx = ctx
         self.prefix = prefix
         options = [
-            discord.SelectOption(label="Start", value="home", emoji="☭", description="Overview of restricted staff commands", default=True),
-            discord.SelectOption(label="Premium", value="premium", emoji="➔", description="Manage Premium access and bot admins"),
-            discord.SelectOption(label="Prefix Access", value="prefix", emoji="➔", description="Manage no-prefix permissions"),
-            discord.SelectOption(label="Bot Admin", value="admin", emoji="➔", description="Manage staff and view bot servers"),
+            discord.SelectOption(label="Start", value="home", description="Overview of restricted staff commands", default=True),
+            discord.SelectOption(label="Premium", value="premium", description="Manage Premium access and bot admins"),
+            discord.SelectOption(label="Prefix Access", value="prefix", description="Manage no-prefix permissions"),
+            discord.SelectOption(label="Bot Admin", value="admin", description="Manage staff and view bot servers"),
         ]
         super().__init__(placeholder="Choose a category", min_values=1, max_values=1, options=options)
 
@@ -1569,11 +1569,11 @@ class BotInfoCategorySelect(discord.ui.Select):
     def __init__(self, ctx):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="Start", value="home", description="Overview of $pyX Security", emoji="☭", default=True),
-            discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-raid, and whitelist", emoji="➔"),
-            discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls", emoji="➔"),
-            discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization", emoji="➔"),
-            discord.SelectOption(label="Statistics", value="stats", description="Bot runtime statistics", emoji="➔"),
+            discord.SelectOption(label="Start", value="home", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-raid, and whitelist"),
+            discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls"),
+            discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization"),
+            discord.SelectOption(label="Statistics", value="stats", description="Bot runtime statistics"),
         ]
         super().__init__(placeholder="Choose a category", min_values=1, max_values=1, options=options)
 
