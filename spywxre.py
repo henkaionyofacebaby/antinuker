@@ -103,11 +103,7 @@ class StyledEmbed(_DiscordEmbed):
     def __init__(self, *args, **kwargs):
         # Madoka-style clean embeds: omit the colored side accent entirely.
         kwargs["color"] = None
-        # Also handle positional titles, while keeping all existing embed content.
-        if args and isinstance(args[0], str):
-            args = (_decorate_embed_label(args[0], "✦"),) + args[1:]
-        elif isinstance(kwargs.get("title"), str):
-            kwargs["title"] = _decorate_embed_label(kwargs["title"], "✦")
+        # Keep command embeds minimal: no automatic title decoration.
         if isinstance(kwargs.get("description"), str):
             kwargs["description"] = _clean_embed_text(kwargs["description"])
         super().__init__(*args, **kwargs)
@@ -127,10 +123,10 @@ class StyledEmbed(_DiscordEmbed):
             )
 
     def add_field(self, *, name, value, inline=True):
-        name = _decorate_embed_label(name, "◇")
+        name = _clean_embed_text(name)
         value = _clean_embed_text(value)
         if not name:
-            name = "◇ Details"
+            name = "Details"
         if not value:
             value = "—"
         return super().add_field(name=name, value=value, inline=inline)
@@ -511,7 +507,7 @@ async def require_premium(ctx):
     if is_premium_guild(ctx.guild):
         return True
     embed = StyledEmbed(
-        title="✦ $pyX Security | Premium Required",
+        title="🛡️ $pyX Security | Premium Required",
         description=(
             "This command is available only in **Premium-enabled servers**.\n"
             "Ask the server owner to contact the bot developer about Premium access."
@@ -1183,16 +1179,16 @@ class HelpCategorySelect(discord.ui.Select):
     def __init__(self, ctx, prefix):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="✦ Home", value="home", emoji="🏠", description="Overview of $pyX Security", default=True),
-            discord.SelectOption(label="⚔ Moderation", value="moderation", emoji="🛡️", description="Kick, ban, purge, and channel controls"),
-            discord.SelectOption(label="✧ Roles", value="roles", emoji="🎭", description="Manage member roles"),
-            discord.SelectOption(label="⛨ Protection", value="protection", emoji="🔒", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
-            discord.SelectOption(label="⌘ Backups & Logs", value="backups", emoji="🧰", description="Backups and security logging"),
-            discord.SelectOption(label="◇ Utilities", value="utilities", emoji="👤", description="Bot/server information and utility commands"),
-            discord.SelectOption(label="✧ Premium", value="premium", emoji="✨", description="Premium customization commands"),
-            discord.SelectOption(label="⚙ Configuration", value="configuration", emoji="⚙️", description="Prefix and help commands"),
+            discord.SelectOption(label="Home", value="home", emoji="🏠", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Moderation", value="moderation", emoji="🛡️", description="Kick, ban, purge, and channel controls"),
+            discord.SelectOption(label="Roles", value="roles", emoji="🎭", description="Manage member roles"),
+            discord.SelectOption(label="Protection", value="protection", emoji="🔒", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
+            discord.SelectOption(label="Backups & Logs", value="backups", emoji="🧰", description="Backups and security logging"),
+            discord.SelectOption(label="Utilities", value="utilities", emoji="👤", description="Bot/server information and utility commands"),
+            discord.SelectOption(label="Premium", value="premium", emoji="✨", description="Premium customization commands"),
+            discord.SelectOption(label="⚙️ Configuration", value="configuration", emoji="⚙️", description="Prefix and help commands"),
         ]
-        super().__init__(placeholder="✦ Choose a command category…", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Choose a category", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.ctx.author.id:
@@ -1214,12 +1210,10 @@ class HelpView(discord.ui.View):
     def update_embed(self, category):
         p = self.prefix
         pages = {
-            "home": ("✦ $pyX Security | Command Center",
-                     "A server protection toolkit built to help moderators manage and secure their community.\n\n"
-                     f"**Prefix:** `{p}`\n**Developer:** SPYWXRE\n**Purpose:** Server protection and moderation\n\n"
-                     "Select a category from the dropdown below to view commands.\n"
-                     "Administrator-only bot-staff commands are listed separately in `admhelp`."),
-            "moderation": ("🛡️ Moderation & Channel Controls",
+            "home": ("🛡️ $pyX Security",
+                     f"Prefix: `{p}`\nDeveloper: SPYWXRE\n\n"
+                     "Choose a category to view commands. Bot staff commands are in `admhelp`."),
+            "moderation": ("🛡️ Moderation",
                            f"`{p}kick @member [reason]` — Kick a member\n"
                            f"`{p}ban @member|<user ID> [reason]` — Ban a member\n"
                            f"`{p}timeout @member|<user ID> <1min|1d|1w> [reason]` — Timeout a member\n"
@@ -1230,12 +1224,12 @@ class HelpView(discord.ui.View):
                            f"`{p}lock` — Lock the current channel\n"
                            f"`{p}unlock` — Restore saved channel permissions\n"
                            f"`{p}lockdown` / `{p}unlockdown` — Lock or restore server channels"),
-            "roles": ("🎭 Role Management",
+            "roles": ("🎭 Roles",
                       f"`{p}role @member|<user ID> <role name|role ID>` — Give a role\n"
                       f"`{p}unrole @member|<user ID> <role name|role ID>` — Remove a role\n"
                       "`/roleall` — Give a role to eligible members\n"
                       "`/unroleall` — Remove a role from eligible members"),
-            "protection": ("🔒 Server Protection",
+            "protection": ("🔒 Protection",
                            f"`{p}antinuke on/off` — Enable or disable anti-nuke\n"
                            f"`{p}security` — View security status\n"
                            f"`{p}antispam on/off/status` — Configure per-server anti-spam\n"
@@ -1246,13 +1240,13 @@ class HelpView(discord.ui.View):
                            f"`{p}whitelist add @member` / `{p}whitelist remove @member` — Edit whitelist\n"
                            f"`{p}whitelist list` — View whitelist\n"
                            "`/lockdown` / `/unlockdown` — Slash-command lockdown controls"),
-            "backups": ("🧰 Backups & Security Logs",
+            "backups": ("🧰 Backups & Logs",
                         f"`{p}backup create` — Create a server backup (Premium)\n"
                         f"`{p}backup load` — Restore a server backup (Premium)\n"
                         f"`{p}setuplogs #channel` — Set up security logs\n"
                         f"`{p}disablelogs` — Disable security logs\n"
                         f"`{p}snipe` — View the latest deleted message"),
-            "utilities": ("👤 Utility & Information",
+            "utilities": ("ℹ️ Information",
                           f"`{p}afk [message]` — Set your AFK status\n"
                           f"`{p}sinfo` — View server information\n"
                           f"`{p}info` — Explore $pyX Security information\n"
@@ -1260,7 +1254,7 @@ class HelpView(discord.ui.View):
                           f"`{p}banner [@user|user ID]` — View a user's Discord banner (Premium)\n"
                           f"`{p}ping` — Show bot gateway latency\n"
                           f"`{p}joinvc` — Join your current voice channel"),
-            "premium": ("✨ Premium Customization",
+            "premium": ("✨ Premium",
                         f"`{p}cb <image URL>` — Change the bot's banner (Premium)\n"
                         f"`{p}cp <image URL>` — Change the bot's profile picture (Premium)\n"
                         f"`{p}cn <new name>` — Change the bot's nickname in this server (Premium)\n"
@@ -1297,12 +1291,12 @@ class AdminHelpSelect(discord.ui.Select):
         self.ctx = ctx
         self.prefix = prefix
         options = [
-            discord.SelectOption(label="✦ Home", value="home", emoji="🏠", description="Overview of restricted staff commands", default=True),
-            discord.SelectOption(label="✧ Premium", value="premium", emoji="💎", description="Manage Premium access and bot admins"),
-            discord.SelectOption(label="⌁ Prefix Access", value="prefix", emoji="🔑", description="Manage no-prefix permissions"),
-            discord.SelectOption(label="⚙ Bot Administration", value="admin", emoji="⚙️", description="Manage staff and view bot servers"),
+            discord.SelectOption(label="Home", value="home", emoji="🏠", description="Overview of restricted staff commands", default=True),
+            discord.SelectOption(label="Premium", value="premium", emoji="💎", description="Manage Premium access and bot admins"),
+            discord.SelectOption(label="Prefix Access", value="prefix", emoji="🔑", description="Manage no-prefix permissions"),
+            discord.SelectOption(label="Bot Admin", value="admin", emoji="⚙️", description="Manage staff and view bot servers"),
         ]
-        super().__init__(placeholder="✦ Choose a staff category…", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Choose a category", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.ctx.author.id:
@@ -1324,12 +1318,12 @@ class AdminHelpView(discord.ui.View):
     def update_embed(self, category):
         p = self.prefix
         pages = {
-            "home": ("✦ $pyX Security | Staff Command Center",
+            "home": ("🛡️ Staff Commands",
                      "Restricted bot-staff tools for Premium access, no-prefix permissions, and bot administration.\n\n"
                      f"**Prefix:** `{p}`\n**Access:** Global bot staff only\n\n"
                      "Select a category from the dropdown below to view command usage.\n"
                      "These commands are not intended for ordinary server administrators."),
-            "premium": ("💎 Premium & Bot Admin Management",
+            "premium": ("💎 Premium & Admins",
                         f"`{p}premium add <server_id>` — Enable Premium for a server (developer only)\n"
                         f"`{p}premium remove <server_id>` — Remove Premium from a server (developer only)\n"
                         f"`{p}premium list` — List Premium servers (developer only)\n"
@@ -1337,13 +1331,13 @@ class AdminHelpView(discord.ui.View):
                         f"`{p}adm remove <user ID|@user>` — Remove bot-admin/Premium-bypass access (developer only)\n"
                         f"`{p}admlist` — View the bot-admin list\n\n"
                         "Use IDs when a user mention cannot be resolved. Only authorized staff can run these commands."),
-            "prefix": ("🔑 No-Prefix Access",
+            "prefix": ("🔑 No-Prefix",
                        f"`{p}np <user ID|@user>` — Allow no-prefix commands in this server\n"
                        f"`{p}npremove <user ID|@user>` — Remove this server's no-prefix access\n"
                        f"`{p}gnp <user ID|@user>` — Allow no-prefix commands globally\n"
                        f"`{p}gnpremove <user ID|@user>` — Remove global no-prefix access\n\n"
                        "Grant access only to trusted users. Global access applies across servers where the bot is present."),
-            "admin": ("⚙️ Bot Administration",
+            "admin": ("⚙️ Bot Admin",
                       f"`{p}adminlist` — View registered global bot staff\n"
                       f"`/adminlist` — Slash-command version, when synced and available\n"
                       f"`{p}generatelink <server_id>` — Generate an invite for a server the bot has joined\n"
@@ -1368,7 +1362,7 @@ async def admin_help_command(ctx):
     """Show the interactive restricted administrator and global-staff command guide."""
     if not is_global_staff(ctx.author):
         embed = StyledEmbed(
-            title="✦ $pyX Security | Access Denied",
+            title="🚫 Access Denied",
             description="This command is restricted to authorized bot staff.",
             color=discord.Color.red(),
             timestamp=discord.utils.utcnow(),
@@ -1391,7 +1385,7 @@ async def avatar_command(ctx, user: discord.User = None):
     target = user or ctx.author
     avatar_url = target.display_avatar.url
     embed = StyledEmbed(
-        title=f"✦ Avatar | {discord.utils.escape_markdown(target.name)}",
+        title=f"🖼️ Avatar: {discord.utils.escape_markdown(target.name)}",
         description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size avatar]({avatar_url})",
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
@@ -1422,7 +1416,7 @@ async def banner_command(ctx, user: discord.User = None):
     banner_asset = fetched_user.banner
     if banner_asset is None:
         embed = StyledEmbed(
-            title=f"✦ Banner | {discord.utils.escape_markdown(target.name)}",
+            title=f"🖼️ Banner: {discord.utils.escape_markdown(target.name)}",
             description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\nThis user does not have a profile banner set.",
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow(),
@@ -1433,7 +1427,7 @@ async def banner_command(ctx, user: discord.User = None):
 
     banner_url = banner_asset.url
     embed = StyledEmbed(
-        title=f"✦ Banner | {discord.utils.escape_markdown(target.name)}",
+        title=f"🖼️ Banner: {discord.utils.escape_markdown(target.name)}",
         description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size banner]({banner_url})",
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
@@ -1499,7 +1493,7 @@ async def server_info_command(ctx):
     )
     embed.add_field(name="🆔 Server ID", value=f"`{guild.id}`", inline=False)
     banner_url = _approved_embed_banner(bot.user, guild=guild)
-    embed.set_footer(text=f"✦ $pyX Security • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    embed.set_footer(text=f"🛡️ $pyX Security • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
     await _send_banner_card(ctx, embed, banner_url=banner_url, guild=guild)
 
 
@@ -1507,13 +1501,13 @@ class BotInfoCategorySelect(discord.ui.Select):
     def __init__(self, ctx):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="✦ Home", value="home", description="Overview of $pyX Security", emoji="🏠", default=True),
+            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", emoji="🏠", default=True),
             discord.SelectOption(label="⛨ Security", value="security", description="Anti-nuke, anti-raid, and whitelist", emoji="🛡️"),
-            discord.SelectOption(label="⚔ Moderation", value="moderation", description="Member moderation and channel controls", emoji="🔨"),
-            discord.SelectOption(label="⌘ Backups & Logs", value="backups", description="Backups, logs, and customization", emoji="💾"),
-            discord.SelectOption(label="◈ Statistics", value="stats", description="Bot runtime statistics", emoji="📊"),
+            discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls", emoji="🔨"),
+            discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization", emoji="💾"),
+            discord.SelectOption(label="Statistics", value="stats", description="Bot runtime statistics", emoji="📊"),
         ]
-        super().__init__(placeholder="✦ Explore $pyX Security…", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Choose a category", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.ctx.author.id:
@@ -1542,17 +1536,17 @@ class BotInfoView(discord.ui.View):
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
         total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("✦ $pyX Security", f"• **Latency:** `{latency_text}`\n• **Uptime:** `{uptime_text}`\n• **Users:** `{total_users:,}`\n• **Servers:** `{len(bot.guilds):,}`\n\n> ✦ Built for server protection, moderation, and reliable security tools.\n> Developed by **SPYWXRE**\n\nChoose a category from the menu below to explore the bot."),
-            "security": ("⛨ Server Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
-            "moderation": ("⚔ Moderation & Controls", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
-            "backups": ("⌘ Backups, Logs & Customization", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
-            "stats": ("◈ Live Bot Statistics", f"• **Latency:** `{latency_text}`\n• **Uptime:** `{uptime_text}`\n• **Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n• **Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n• **Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
+            "home": ("🛡️ $pyX Security", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\n> ✦ Built for server protection, moderation, and reliable security tools.\n> Developed by **SPYWXRE**\n\nChoose a category from the menu below to explore the bot."),
+            "security": ("🛡️ Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
+            "moderation": ("🔨 Moderation", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
+            "backups": ("🧰 Backups & Logs", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
+            "stats": ("📊 Statistics", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n• **Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n👥 **Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n🌐 **Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
         }
         title, description = labels.get(category, labels["home"])
         self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
         if bot_user:
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
-            self.embed.set_footer(text="✦ $pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
+            self.embed.set_footer(text="🛡️ $pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
         for item in self.children:
             if isinstance(item, BotInfoCategorySelect):
                 for option in item.options:
@@ -1580,9 +1574,9 @@ async def ping_command(ctx):
     embed = StyledEmbed(
         title="📶 Connection Status",
         description=(
-            f"╭・**Latency:** `{latency_ms} ms`\n"
-            f"├・**Status:** {connection_status}\n"
-            f"╰・{latency_note}"
+            f"📶 Latency: `{latency_ms} ms`\n"
+            f"🟢 Status: {connection_status}\n"
+            f"ℹ️ {latency_note}"
         ),
         color=discord.Color.from_rgb(35, 0, 55),
         timestamp=discord.utils.utcnow(),
@@ -1646,7 +1640,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         return await ctx.reply("Use this command in a server.", mention_author=False)
     if not has_admin_access(ctx.author):
         embed = StyledEmbed(
-            title="✦ $pyX Security | Permission Denied",
+            title="🛡️ $pyX Security | Permission Denied",
             description="Server admins only.",
             color=discord.Color.from_rgb(128, 0, 255),
         )
@@ -1694,7 +1688,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         else:
             label = "Server-specific profile picture"
         embed = StyledEmbed(
-            title="✦ $pyX Security | Profile Updated",
+            title="🛡️ $pyX Security | Profile Updated",
             description=f"Updated the bot profile for **{ctx.guild.name}**.",
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow(),
@@ -1704,7 +1698,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         await ctx.reply(embed=embed, mention_author=False)
     except ValueError as exc:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Invalid Image",
+            title="🛡️ $pyX Security | Invalid Image",
             description=str(exc),
             color=discord.Color.from_rgb(128, 0, 255),
         )
@@ -1720,7 +1714,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
     except discord.HTTPException as exc:
         logger.warning("Discord rejected server-specific profile change: %r", exc)
         embed = StyledEmbed(
-            title="✦ $pyX Security | Profile Update Failed",
+            title="🛡️ $pyX Security | Profile Update Failed",
             description=(
                 "Discord rejected the profile change. Check that the image is supported and that Discord "
                 "allows guild-specific profile banners for this bot. "
@@ -1758,7 +1752,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
 
     if not arguments.strip():
         embed = StyledEmbed(
-            title="✦ $pyX Security | Steal Emoji",
+            title="🛡️ $pyX Security | Steal Emoji",
             description=(
                 "Mention a custom emoji from another server.\n"
                 "Usage: `!steal <:emoji_name:emoji_id>`\n"
@@ -1777,7 +1771,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
     )
     if not can_manage:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Permission Denied",
+            title="🛡️ $pyX Security | Permission Denied",
             description="You need Manage Expressions permission.",
             color=purple,
         )
@@ -1791,7 +1785,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
     )
     if not bot_can_manage:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Missing Permission",
+            title="🛡️ $pyX Security | Missing Permission",
             description="I need Manage Expressions permission.",
             color=purple,
         )
@@ -1800,7 +1794,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
     matches = list(_CUSTOM_EMOJI_RE.finditer(arguments))
     if not matches:
         embed = StyledEmbed(
-            title="✦ $pyX Security | No Custom Emoji Found",
+            title="🛡️ $pyX Security | No Custom Emoji Found",
             description=(
                 "Mention a custom Discord emoji to copy it."
             ),
@@ -1869,7 +1863,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
                 failures.append(f"`{original_name}` — Discord rejected it: {detail[:180]}")
 
     embed = StyledEmbed(
-        title="✦ $pyX Security | Emoji Import Results",
+        title="🛡️ $pyX Security | Emoji Import Results",
         description=f"Copied **{len(success_names)}/{len(unique_matches)}** emoji(s).",
         color=purple,
         timestamp=discord.utils.utcnow(),
@@ -1892,7 +1886,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
 
     if not has_admin_access(ctx.author):
         embed = StyledEmbed(
-            title="✦ $pyX Security | Permission Denied",
+            title="🛡️ $pyX Security | Permission Denied",
             description="Server admins only.",
             color=purple,
         )
@@ -1903,7 +1897,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         return await ctx.reply("I couldn't find my member profile in this server.", mention_author=False)
     if not bot_member.guild_permissions.change_nickname:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Missing Permission",
+            title="🛡️ $pyX Security | Missing Permission",
             description="I need Change Nickname permission.",
             color=purple,
         )
@@ -1923,11 +1917,11 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         )
     except discord.Forbidden:
         description = "Nickname change failed. Check my permissions and role position."
-        embed = StyledEmbed(title="✦ $pyX Security | Nickname Change Failed", description=description, color=purple)
+        embed = StyledEmbed(title="🛡️ $pyX Security | Nickname Change Failed", description=description, color=purple)
         return await ctx.reply(embed=embed, mention_author=False)
     except discord.HTTPException as exc:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Nickname Change Failed",
+            title="🛡️ $pyX Security | Nickname Change Failed",
             description="Could not update nickname. Check permissions.",
             color=purple,
         )
@@ -1938,7 +1932,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
     else:
         description = f"My server nickname in **{ctx.guild.name}** is now **{discord.utils.escape_markdown(new_nickname)}**."
     embed = StyledEmbed(
-        title="✦ $pyX Security | Nickname Updated",
+        title="🛡️ $pyX Security | Nickname Updated",
         description=description,
         color=purple,
         timestamp=discord.utils.utcnow(),
@@ -2836,7 +2830,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     # This check intentionally ignores guild owner/admin permissions.
     if not is_bot_admin_id(ctx.author.id):
         embed = StyledEmbed(
-            title="✦ $pyX Security | Access Denied",
+            title="🚫 Access Denied",
             description="Only the bot developer and authorized bot admins can manage Premium.",
             color=discord.Color.red(),
         )
@@ -2845,7 +2839,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     action = (action or "help").lower()
     if action in ("help", "status"):
         embed = StyledEmbed(
-            title="✦ $pyX Security | Premium Manager",
+            title="🛡️ $pyX Security | Premium Manager",
             description=(
                 "`!premium add [server_id]` — Enable Premium\n`!premium remove [server_id]` — Remove Premium\n`!premium list` — List Premium servers"
             ),
@@ -2867,7 +2861,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
             if len(listing) > 3900:
                 listing = listing[:3850].rsplit("\n", 1)[0] + "\n… list shortened to fit Discord's embed limit."
         embed = StyledEmbed(
-            title="✦ $pyX Security | Premium Servers",
+            title="🛡️ $pyX Security | Premium Servers",
             description=listing,
             color=discord.Color.from_rgb(128, 0, 255),
         )
@@ -2904,7 +2898,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     config["premium_guilds"] = list(config["premium_guild_ids"])
     save_config()
     embed = StyledEmbed(
-        title="✦ $pyX Security | Premium Updated",
+        title="🛡️ $pyX Security | Premium Updated",
         description=message,
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
@@ -2918,7 +2912,7 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
     """Manage bot-admin access; restricted strictly to the configured primary developer ID."""
     if ctx.author.id != DEVELOPER_ID:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Access Denied",
+            title="🚫 Access Denied",
             description="Developer only.",
             color=discord.Color.red(),
         )
@@ -2927,7 +2921,7 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
     action = (action or "help").lower()
     if action not in ("add", "remove") or user is None:
         embed = StyledEmbed(
-            title="✦ $pyX Security | Premium Admin Manager",
+            title="🛡️ $pyX Security | Premium Admin Manager",
             description=(
                 "`!adm add @user` — Grant bot-admin access to restricted commands and Premium features\n"
                 "`!adm remove @user` — Remove that bypass access\n"
@@ -2959,7 +2953,7 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
     config["premium_admin_ids"] = [owner_id] + [uid for uid in admin_ids if uid != owner_id]
     save_config()
     embed = StyledEmbed(
-        title="✦ $pyX Security | Admin List Updated",
+        title="🛡️ $pyX Security | Admin List Updated",
         description=message,
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
@@ -2986,7 +2980,7 @@ async def premium_admin_list_command(ctx):
     """Display account usernames and IDs for bot admins to authorized bot staff only."""
     if not is_global_staff(ctx.author):
         embed = StyledEmbed(
-            title="✦ $pyX Security | Access Denied",
+            title="🚫 Access Denied",
             description="This command is restricted to authorized bot staff.",
             color=discord.Color.red(),
         )
@@ -3002,7 +2996,7 @@ async def premium_admin_list_command(ctx):
     purple = discord.Color.from_rgb(35, 0, 55)
 
     embed = StyledEmbed(
-        title="✦ $pyX Security | Staff List",
+        title="🛡️ $pyX Security | Staff List",
         description=(
             "Need help with Premium access? Contact the developer or an authorized staff member for support and assistance."
         ),
@@ -3185,7 +3179,7 @@ BACKUP_DIR = "backups"
 
 
 def feature_embed(title, description, *, color=PURPLE):
-    embed = StyledEmbed(title=f"✦ $pyX Security | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
+    embed = StyledEmbed(title=f"🛡️ $pyX Security | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
     embed.set_footer(text="$pyX Security")
     return embed
 
@@ -4381,7 +4375,7 @@ async def slash_admlist(interaction: discord.Interaction):
     ordered_ids = [owner_id] + [uid for uid in admin_ids if uid != owner_id]
     purple = discord.Color.from_rgb(35, 0, 55)
     embed = StyledEmbed(
-        title="✦ $pyX Security | Staff List",
+        title="🛡️ $pyX Security | Staff List",
         description="Need help with Premium access? Contact the developer or an authorized staff member for support and assistance.",
         color=purple,
         timestamp=discord.utils.utcnow(),
@@ -4963,23 +4957,12 @@ async def on_command_error(ctx, error):
         )
     if isinstance(error, commands.MissingRequiredArgument):
         command_name = ctx.command.qualified_name if ctx.command else "command"
-        usage = {
-            "ban": "`!ban <@user/user ID> [reason]`",
-            "kick": "`!kick <@user/user ID> [reason]`",
-            "timeout": "`!timeout <@user/user ID> <1min/1d/1w> [reason]`",
-            "mute": "`!timeout <@user/user ID> <1min/1d/1w> [reason]`",
-            "untimeout": "`!untimeout <@user/user ID> [reason]`",
-            "unmute": "`!untimeout <@user/user ID> [reason]`",
-        }.get(command_name, f"`{ctx.prefix}{command_name} ...`")
-        embed = role_embed(
-            "Missing Command Details",
-            f"╭・Looks like a required detail is missing.\n"
-            f"├・**Command:** `{ctx.prefix}{command_name}`\n"
-            f"╰・**Usage:** {usage}\n\n"
-            "◇ Example: `!ban 123456789012345678 Rule violations`",
-            discord.Color.orange(),
+        missing = getattr(error, "param", None)
+        missing_name = getattr(missing, "name", "argument")
+        return await ctx.reply(
+            f"<a:bell_knr:1540885201440211028> **Error**\nMissing argument: `{missing_name}`. Use `{ctx.prefix}help {command_name}` for usage.",
+            mention_author=False
         )
-        return await ctx.reply(embed=embed, mention_author=False)
     if isinstance(error, commands.MemberNotFound):
         return await ctx.reply(
             "Member not found. Mention them or use their ID.",
