@@ -52,7 +52,7 @@ _EMBED_VISUAL_PREFIXES = (
 )
 
 def _arrow_lines(value):
-    """Use one consistent, visible arrow for informational command lines."""
+    """Use ➤ only for actual command entries; keep prose and errors clean."""
     value = _clean_embed_text(value)
     if not isinstance(value, str) or not value:
         return value
@@ -63,15 +63,15 @@ def _arrow_lines(value):
         if not stripped:
             lines.append("")
             continue
-        # Normalize existing leading arrow styles rather than stacking symbols.
         for arrow in legacy_arrows:
             if stripped.startswith(arrow):
                 stripped = stripped[len(arrow):].lstrip()
                 break
-        if stripped.startswith("➤"):
-            lines.append(stripped)
-        else:
-            lines.append(f"➤ {stripped}")
+        # Help pages list commands in inline code, while overview text remains plain.
+        is_command_entry = stripped.startswith(("`", "/"))
+        if is_command_entry and not stripped.startswith("➤"):
+            stripped = f"➤ {stripped}"
+        lines.append(stripped)
     return "\n".join(lines)
 
 def _decorate_embed_label(value, prefix):
@@ -150,8 +150,8 @@ class StyledEmbed(_DiscordEmbed):
                 kwargs["title"] = re.sub(r"^(?:˃|➔|➜|→|▸|›|➤)\s*", "", kwargs["title"]).strip()
                 if "error" in kwargs["title"].lower() and not kwargs["title"].startswith("⚒"):
                     kwargs["title"] = "⚒ " + kwargs["title"]
-            if description and not is_error and not is_security_log:
-                description = _arrow_lines(description)
+            # Do not decorate every response line. Command-list views call
+            # _arrow_lines explicitly; ordinary command replies stay minimal.
             kwargs["description"] = description
         super().__init__(*args, **kwargs)
         bot_obj = globals().get("bot")
@@ -1091,7 +1091,7 @@ async def on_message_edit(before, after):
     after_text = after.content.strip() or "[empty message]"
     await send_log(
         after.guild,
-        "➤ Message Edited",
+        "▸ Message Edited",
         f"**Before** {before_text[:1500]}\n\n"
         f"**After** {after_text[:1500]}\n\n"
         f"**Channel** **Text** {after.channel.mention}",
@@ -1101,7 +1101,7 @@ async def on_message_edit(before, after):
 async def on_guild_channel_delete(channel):
     await send_log(
         channel.guild,
-        "➤ Channel Deleted",
+        "▸ Channel Deleted",
         f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}",
     )
     try:
@@ -1117,7 +1117,7 @@ async def on_invite_create(invite):
     inviter = invite.inviter.mention if invite.inviter else "Unknown user"
     await send_log(
         guild,
-        "➤ Invite Created",
+        "▸ Invite Created",
         f"`{invite.code}` by **{inviter}**",
     )
 
@@ -1199,7 +1199,7 @@ async def on_voice_state_update(member, before, after):
     await send_log(member.guild, title, detail, color)
 @bot.event
 async def on_guild_channel_create(channel):
-    await send_log(channel.guild, "➤ Channel Created", f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}")
+    await send_log(channel.guild, "▸ Channel Created", f"{channel.mention if hasattr(channel, 'mention') else '#' + channel.name}")
     # Refresh only the changed channel instead of rebuilding the whole guild snapshot.
     try:
         guild = channel.guild
@@ -1258,7 +1258,7 @@ class HelpCategorySelect(discord.ui.Select):
     def __init__(self, ctx, prefix):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="Start", value="home", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", default=True),
             discord.SelectOption(label="Moderation", value="moderation", description="Kick, ban, purge, and channel controls"),
             discord.SelectOption(label="Roles", value="roles", description="Manage member roles"),
             discord.SelectOption(label="Protection", value="protection", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
@@ -1372,7 +1372,7 @@ class AdminHelpSelect(discord.ui.Select):
         self.ctx = ctx
         self.prefix = prefix
         options = [
-            discord.SelectOption(label="Start", value="home", description="Overview of restricted staff commands", default=True),
+            discord.SelectOption(label="Home", value="home", description="Overview of restricted staff commands", default=True),
             discord.SelectOption(label="Premium", value="premium", description="Manage Premium access and bot admins"),
             discord.SelectOption(label="Prefix Access", value="prefix", description="Manage no-prefix permissions"),
             discord.SelectOption(label="Bot Admin", value="admin", description="Manage staff and view bot servers"),
@@ -1584,7 +1584,7 @@ class BotInfoCategorySelect(discord.ui.Select):
     def __init__(self, ctx):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="Start", value="home", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", default=True),
             discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-raid, and whitelist"),
             discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls"),
             discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization"),
@@ -1619,7 +1619,7 @@ class BotInfoView(discord.ui.View):
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
         total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("Overview", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\n> ✦ Built for server protection, moderation, and reliable security tools.\n> Developed by **SPYWXRE**\n\nChoose a category from the menu below to explore the bot."),
+            "home": ("Overview", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **SPYWXRE**\n\nSelect a category below to explore features."),
             "security": ("Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
             "moderation": ("Moderation", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
             "backups": ("Backups & Logs", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
@@ -3195,7 +3195,7 @@ async def whitelist_add(ctx, member: discord.Member):
     save_config()
     await send_log(
         ctx.guild,
-        "➤ Server Whitelist Added",
+        "▸ Server Whitelist Added",
         f"{member.mention} (`{member.id}`) added by {ctx.author.mention} (`{ctx.author.id}`).",
     )
     await ctx.reply(
@@ -3221,7 +3221,7 @@ async def whitelist_remove(ctx, member: discord.Member):
     save_config()
     await send_log(
         ctx.guild,
-        "➤ Server Whitelist Removed",
+        "▸ Server Whitelist Removed",
         f"{member.mention} (`{member.id}`) removed by {ctx.author.mention} (`{ctx.author.id}`).",
     )
     await ctx.reply(
@@ -4170,7 +4170,7 @@ async def slash_whitelist(
         save_config()
         await send_log(
             guild,
-            "➤ Server Whitelist Added",
+            "▸ Server Whitelist Added",
             f"{user.mention} (`{user.id}`) added by {interaction.user.mention} (`{interaction.user.id}`).",
         )
         return await interaction.response.send_message(
@@ -4191,7 +4191,7 @@ async def slash_whitelist(
     save_config()
     await send_log(
         guild,
-        "➤ Server Whitelist Removed",
+        "▸ Server Whitelist Removed",
         f"{user.mention} (`{user.id}`) removed by {interaction.user.mention} (`{interaction.user.id}`).",
     )
     await interaction.response.send_message(
