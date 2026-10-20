@@ -52,16 +52,23 @@ _EMBED_VISUAL_PREFIXES = (
 )
 
 def _arrow_lines(value):
-    """Prefix informational/help lines with the simple Madoka-style arrow."""
+    """Use one consistent, visible arrow for informational command lines."""
     value = _clean_embed_text(value)
     if not isinstance(value, str) or not value:
         return value
     lines = []
+    legacy_arrows = ("˃", "➔", "➜", "→", "▸", "›")
     for line in value.split("\n"):
         stripped = line.strip()
         if not stripped:
             lines.append("")
-        elif stripped.startswith("➤"):
+            continue
+        # Normalize existing leading arrow styles rather than stacking symbols.
+        for arrow in legacy_arrows:
+            if stripped.startswith(arrow):
+                stripped = stripped[len(arrow):].lstrip()
+                break
+        if stripped.startswith("➤"):
             lines.append(stripped)
         else:
             lines.append(f"➤ {stripped}")
@@ -139,6 +146,10 @@ class StyledEmbed(_DiscordEmbed):
             # have their own formatting and must not be prefixed line-by-line.
             is_error = "error" in title_text or "failed" in title_text or "denied" in title_text
             is_security_log = "security logs" in footer_text
+            if is_error and isinstance(kwargs.get("title"), str):
+                kwargs["title"] = re.sub(r"^(?:˃|➔|➜|→|▸|›|➤)\s*", "", kwargs["title"]).strip()
+                if "error" in kwargs["title"].lower() and not kwargs["title"].startswith("⚒"):
+                    kwargs["title"] = "⚒ " + kwargs["title"]
             if description and not is_error and not is_security_log:
                 description = _arrow_lines(description)
             kwargs["description"] = description
@@ -582,7 +593,7 @@ async def send_log(guild, title, description, color=None):
     # Keep the requested arrow-style event logs clean and aligned. Other
     # existing security logs retain their established compact formatting.
     raw_description = _clean_embed_text(description or "")
-    if title.startswith("➤ "):
+    if title.startswith(("➤ ", "˃ ", "➔ ", "➜ ", "→ ", "▸ ", "› ")):
         formatted_description = raw_description[:4000] or "No additional details were provided."
     else:
         detail_lines = []
