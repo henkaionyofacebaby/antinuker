@@ -1468,7 +1468,7 @@ async def avatar_command(ctx, user: discord.User = None):
     target = user or ctx.author
     avatar_url = target.display_avatar.url
     embed = StyledEmbed(
-        title=f"🖼️ Avatar: {discord.utils.escape_markdown(target.name)}",
+        title=f"Avatar: {discord.utils.escape_markdown(target.name)}",
         description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size avatar]({avatar_url})",
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
@@ -1499,7 +1499,7 @@ async def banner_command(ctx, user: discord.User = None):
     banner_asset = fetched_user.banner
     if banner_asset is None:
         embed = StyledEmbed(
-            title=f"🖼️ Banner: {discord.utils.escape_markdown(target.name)}",
+            title=f"Banner: {discord.utils.escape_markdown(target.name)}",
             description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\nThis user does not have a profile banner set.",
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow(),
@@ -1510,7 +1510,7 @@ async def banner_command(ctx, user: discord.User = None):
 
     banner_url = banner_asset.url
     embed = StyledEmbed(
-        title=f"🖼️ Banner: {discord.utils.escape_markdown(target.name)}",
+        title=f"Banner: {discord.utils.escape_markdown(target.name)}",
         description=f"**User:** {target.mention if isinstance(target, discord.Member) else target.name}\n**User ID:** `{target.id}`\n[Open full-size banner]({banner_url})",
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
