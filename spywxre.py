@@ -1290,7 +1290,7 @@ class HelpView(discord.ui.View):
         p = self.prefix
         pages = {
             "home": ("Overview",
-                     f"Prefix: `{p}`\nDeveloper: SPYWXRE\n\n"
+                     f"Prefix: `{p}`\nDeveloper: Wxre Development\n\n"
                      "Choose a category to view commands. Bot staff commands are in `admhelp`."),
             "moderation": ("Moderation",
                            f"`{p}kick @member [reason]` — Kick a member\n"
@@ -1353,7 +1353,7 @@ class HelpView(discord.ui.View):
         if bot.user:
             self.embed.set_author(name="Kanade", icon_url=bot.user.display_avatar.url)
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
-            self.embed.set_footer(text="Kanade • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
+            self.embed.set_footer(text="Kanade • Developed by Wxre Development", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, HelpCategorySelect):
                 for option in item.options:
@@ -1621,7 +1621,7 @@ class BotInfoView(discord.ui.View):
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
         total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("Overview", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **SPYWXRE**\n\nSelect a category below to explore features."),
+            "home": ("Overview", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **Wxre Development**\n\nSelect a category below to explore features."),
             "security": ("Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
             "moderation": ("Moderation", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
             "backups": ("Backups & Logs", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
@@ -1633,7 +1633,7 @@ class BotInfoView(discord.ui.View):
         if bot_user:
             self.embed.set_author(name="Kanade", icon_url=bot_user.display_avatar.url)
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
-            self.embed.set_footer(text="🛡️ Kanade • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
+            self.embed.set_footer(text="🛡️ Kanade • Developed by Wxre Development", icon_url=bot_user.display_avatar.url)
         for item in self.children:
             if isinstance(item, BotInfoCategorySelect):
                 for option in item.options:
@@ -1781,7 +1781,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
             timestamp=discord.utils.utcnow(),
         )
         embed.set_image(url=ctx.message.attachments[0].url if ctx.message.attachments else image_url)
-        embed.set_footer(text="Kanade • Developed by spywxre", icon_url=bot.user.display_avatar.url if bot.user else None)
+        embed.set_footer(text="Kanade • Developed by Wxre Development", icon_url=bot.user.display_avatar.url if bot.user else None)
         await ctx.reply(embed=embed, mention_author=False)
     except ValueError as exc:
         embed = StyledEmbed(
@@ -1959,7 +1959,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
         embed.add_field(name="Added", value="\n".join(success_names)[:1024], inline=False)
     if failures:
         embed.add_field(name="Not Added", value="\n".join(failures)[:1024], inline=False)
-    embed.set_footer(text="Kanade • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by Wxre Development")
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -2024,7 +2024,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         color=purple,
         timestamp=discord.utils.utcnow(),
     )
-    embed.set_footer(text="Kanade • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by Wxre Development")
     await ctx.reply(embed=embed, mention_author=False)
 
 # ==================== AFK SYSTEM ====================
@@ -2859,7 +2859,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
             ),
             color=purple
         )
-        embed.set_footer(text="Kanade • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by Wxre Development")
         return await ctx.reply(embed=embed, mention_author=False)
 
     if not has_admin_access(ctx.author) and not is_owner_id(ctx.author.id):
@@ -2868,7 +2868,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
             description="Administrator permission required.",
             color=purple
         )
-        embed.set_footer(text="Kanade • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by Wxre Development")
         return await ctx.reply(embed=embed, mention_author=False)
 
     if new_prefix is None:
@@ -2879,7 +2879,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
             ),
             color=purple
         )
-        embed.set_footer(text="Kanade • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by Wxre Development")
         return await ctx.reply(embed=embed, mention_author=False)
 
     new_prefix = new_prefix.strip()
@@ -2893,7 +2893,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
             ),
             color=purple
         )
-        embed.set_footer(text="Kanade • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by Wxre Development")
         return await ctx.reply(embed=embed, mention_author=False)
 
     config.setdefault("guild_prefixes", {})[guild_key] = new_prefix
@@ -2907,7 +2907,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
     )
     embed.add_field(name="Previous prefix", value=f"`{current_prefix}`", inline=True)
     embed.add_field(name="New prefix", value=f"`{new_prefix}`", inline=True)
-    embed.set_footer(text="Kanade • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by Wxre Development")
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -3145,7 +3145,7 @@ async def antinuke_command(ctx, mode: str = None):
             ),
             color=purple
         )
-        embed.set_footer(text="Kanade • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by Wxre Development")
         return await ctx.reply(embed=embed, mention_author=False)
 
     enabled = mode == "on"
@@ -3169,7 +3169,7 @@ async def antinuke_command(ctx, mode: str = None):
         value=ctx.author.mention,
         inline=True
     )
-    embed.set_footer(text="Kanade • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by Wxre Development")
     await ctx.reply(embed=embed, mention_author=False)
 # ==================== PER-SERVER PREFIX WHITELIST ====================
 @bot.group(name="whitelist", invoke_without_command=True)
@@ -4425,7 +4425,7 @@ async def slash_info(interaction: discord.Interaction):
     )
     if user:
         embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text="Kanade • Developed by spywxre", icon_url=user.display_avatar.url if user else None)
+    embed.set_footer(text="Kanade • Developed by Wxre Development", icon_url=user.display_avatar.url if user else None)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="serverinfo", description="Show information about this server")
