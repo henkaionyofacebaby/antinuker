@@ -122,7 +122,7 @@ async def _edit_banner_card(interaction, embed, view, guild=None):
         return await interaction.response.edit_message(embed=embed, view=view)
 
 class StyledEmbed(_DiscordEmbed):
-    """Consistent $pyX branding with readable spacing and safe defaults."""
+    """Consistent Kanade branding with readable spacing and safe defaults."""
     def __init__(self, *args, **kwargs):
         # Madoka-style clean embeds: omit the colored side accent entirely.
         kwargs["color"] = None
@@ -135,7 +135,7 @@ class StyledEmbed(_DiscordEmbed):
                 "help", "about", "information", " bot info", "server info", "sinfo"
             ))
             if not keep_brand and "$pyx security" in normalized_title:
-                title = re.sub(r"(?i)\$pyX Security\s*\|?\s*", "", title).strip(" |—-")
+                title = re.sub(r"(?i)\Kanade\s*\|?\s*", "", title).strip(" |—-")
                 title = re.sub(r"^[^\w$]+\s*", "", title).strip()
                 kwargs["title"] = title or "Details"
         if isinstance(kwargs.get("description"), str):
@@ -247,7 +247,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
 )
-logger = logging.getLogger("$pyX")
+logger = logging.getLogger("Kanade")
 # ==================== CONFIG FILE ====================
 def load_config():
     saved = {}
@@ -545,14 +545,14 @@ async def require_premium(ctx):
     if is_premium_guild(ctx.guild):
         return True
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Premium Required",
+        title="🛡️ Kanade | Premium Required",
         description=(
             "This command is available only in **Premium-enabled servers**.\n"
             "Ask the server owner to contact the bot developer about Premium access."
         ),
         color=discord.Color.from_rgb(128, 0, 255),
     )
-    embed.set_footer(text="$pyX Security • Premium")
+    embed.set_footer(text="Kanade • Premium")
     await ctx.reply(embed=embed, mention_author=False)
     return False
 def get_threshold(action):
@@ -615,7 +615,7 @@ async def send_log(guild, title, description, color=None):
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text="$pyX Security • Security Logs")
+    embed.set_footer(text="Kanade • Security Logs")
     try:
         await channel.send(embed=embed)
     except discord.HTTPException:
@@ -644,13 +644,13 @@ async def notify_owners(guild, message):
         return
 
     embed = StyledEmbed(
-        title="$pyX Security | Anti-Nuke Alert",
+        title="Kanade | Anti-Nuke Alert",
         description=(message or "An anti-nuke event was detected.")[:4000],
         color=discord.Color.red(),
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(name="Server", value=f"{guild.name[:200]}\n`{guild.id}`", inline=False)
-    embed.set_footer(text="$pyX Security • Owner Notification")
+    embed.set_footer(text="Kanade • Owner Notification")
 
     for owner_id in owner_ids:
         try:
@@ -712,26 +712,26 @@ async def restore_deleted_channel(guild, entry):
             await guild.create_category(
                 name,
                 position=snapshot.get("position", 0),
-                reason="$pyX anti-nuke recovery"
+                reason="Kanade anti-nuke recovery"
             )
         elif channel_type == "voice":
             await guild.create_voice_channel(
                 name,
                 category=category,
                 position=snapshot.get("position", 0),
-                reason="$pyX anti-nuke recovery"
+                reason="Kanade anti-nuke recovery"
             )
         elif channel_type == "stage_voice":
             await guild.create_stage_channel(
                 name,
                 category=category,
-                reason="$pyX anti-nuke recovery"
+                reason="Kanade anti-nuke recovery"
             )
         elif channel_type == "forum":
             await guild.create_forum(
                 name,
                 category=category,
-                reason="$pyX anti-nuke recovery"
+                reason="Kanade anti-nuke recovery"
             )
         else:
             await guild.create_text_channel(
@@ -741,7 +741,7 @@ async def restore_deleted_channel(guild, entry):
                 nsfw=snapshot.get("nsfw", False),
                 slowmode_delay=snapshot.get("slowmode_delay", 0),
                 position=snapshot.get("position", 0),
-                reason="$pyX anti-nuke recovery"
+                reason="Kanade anti-nuke recovery"
             )
         return (
             f"Recreated **{name}**. Original channel IDs, messages, "
@@ -768,7 +768,7 @@ async def restore_deleted_role(guild, entry):
             colour=discord.Colour(snapshot["color"]),
             hoist=snapshot["hoist"],
             mentionable=snapshot["mentionable"],
-            reason="$pyX anti-nuke recovery"
+            reason="Kanade anti-nuke recovery"
         )
         return (
             f"Recreated role **{role.name}**. Original role ID, "
@@ -794,7 +794,7 @@ async def punish_actor(guild, actor, reason):
                 "or above the bot's top role."
             )
         await member.kick(
-            reason=f"$pyX anti-nuke: {reason}"[:480]
+            reason=f"Kanade anti-nuke: {reason}"[:480]
         )
         return f"**Kicked:** {member} (`{member.id}`)"
     except discord.NotFound:
@@ -851,7 +851,7 @@ async def lockdown_guild(guild, reason="Security lockdown"):
                         await channel.set_permissions(
                             guild.default_role,
                             overwrite=overwrite,
-                            reason="$pyX timed lockdown ended"
+                            reason="Kanade timed lockdown ended"
                         )
                 except (discord.Forbidden, discord.HTTPException):
                     continue
@@ -972,7 +972,7 @@ async def process_audit_entry(entry):
         try:
             await guild.edit(
                 name=old_name,
-                reason="$pyX anti-nuke: revert unauthorized server rename"
+                reason="Kanade anti-nuke: revert unauthorized server rename"
             )
             details.append(
                 f"**Server rename reverted:** "
@@ -993,7 +993,7 @@ async def process_audit_entry(entry):
                 await role.edit(
                     permissions=old_permissions,
                     reason=(
-                        "$pyX anti-nuke: "
+                        "Kanade anti-nuke: "
                         "revert dangerous permission grant"
                     )
                 )
@@ -1012,7 +1012,7 @@ async def process_audit_entry(entry):
     )
     await notify_owners(guild, "\n".join(details))
     if config.get("lockdown_on_trigger", False):
-        await lockdown_guild(guild, "$pyX anti-nuke trigger")
+        await lockdown_guild(guild, "Kanade anti-nuke trigger")
 # ==================== EVENTS ====================
 @bot.event
 async def on_ready():
@@ -1258,7 +1258,7 @@ class HelpCategorySelect(discord.ui.Select):
     def __init__(self, ctx, prefix):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Home", value="home", description="Overview of Kanade", default=True),
             discord.SelectOption(label="Moderation", value="moderation", description="Kick, ban, purge, and channel controls"),
             discord.SelectOption(label="Roles", value="roles", description="Manage member roles"),
             discord.SelectOption(label="Protection", value="protection", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
@@ -1327,8 +1327,8 @@ class HelpView(discord.ui.View):
                         f"`{p}snipe` — View the latest deleted message"),
             "utilities": ("Information",
                           f"`{p}afk [message]` — Set your AFK status\n"
-                          f"`{p}sinfo` — View server information\n"
-                          f"`{p}info` — Explore $pyX Security information\n"
+                          f"`{p}server` — View server information\n"
+                          f"`{p}info` — Explore Kanade information\n"
                           f"`{p}av [@user]` — View a user's avatar (Premium)\n"
                           f"`{p}banner [@user|user ID]` — View a user's Discord banner (Premium)\n"
                           f"`{p}ping` — Show bot gateway latency\n"
@@ -1351,9 +1351,9 @@ class HelpView(discord.ui.View):
                                  color=discord.Color.from_rgb(35, 0, 55),
                                  timestamp=discord.utils.utcnow())
         if bot.user:
-            self.embed.set_author(name="$pyX Security", icon_url=bot.user.display_avatar.url)
+            self.embed.set_author(name="Kanade", icon_url=bot.user.display_avatar.url)
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
-            self.embed.set_footer(text="$pyX Security • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
+            self.embed.set_footer(text="Kanade • Developed by SPYWXRE", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, HelpCategorySelect):
                 for option in item.options:
@@ -1431,9 +1431,9 @@ class AdminHelpView(discord.ui.View):
                                  color=discord.Color.from_rgb(35, 0, 55),
                                  timestamp=discord.utils.utcnow())
         if bot.user:
-            self.embed.set_author(name="$pyX Security", icon_url=bot.user.display_avatar.url)
+            self.embed.set_author(name="Kanade", icon_url=bot.user.display_avatar.url)
             self.embed.set_thumbnail(url=bot.user.display_avatar.url)
-            self.embed.set_footer(text="$pyX Security • Restricted Staff Help", icon_url=bot.user.display_avatar.url)
+            self.embed.set_footer(text="Kanade • Restricted Staff Help", icon_url=bot.user.display_avatar.url)
         for item in self.children:
             if isinstance(item, AdminHelpSelect):
                 for option in item.options:
@@ -1452,7 +1452,7 @@ async def admin_help_command(ctx):
         )
         if bot.user:
             embed.set_thumbnail(url=bot.user.display_avatar.url)
-            embed.set_footer(text="$pyX Security • Staff only")
+            embed.set_footer(text="Kanade • Staff only")
         return await ctx.reply(embed=embed, mention_author=False)
 
     active_prefix = config.get("guild_prefixes", {}).get(str(ctx.guild.id), PREFIX) if ctx.guild else PREFIX
@@ -1474,7 +1474,7 @@ async def avatar_command(ctx, user: discord.User = None):
         timestamp=discord.utils.utcnow(),
     )
     embed.set_image(url=avatar_url)
-    embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+    embed.set_footer(text="Kanade • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -1504,7 +1504,7 @@ async def banner_command(ctx, user: discord.User = None):
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow(),
         )
-        embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+        embed.set_footer(text="Kanade • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
         await ctx.reply(embed=embed, mention_author=False)
         return
 
@@ -1516,11 +1516,11 @@ async def banner_command(ctx, user: discord.User = None):
         timestamp=discord.utils.utcnow(),
     )
     embed.set_image(url=banner_url)
-    embed.set_footer(text="$pyX Security • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
+    embed.set_footer(text="Kanade • Premium Feature", icon_url=ctx.bot.user.display_avatar.url if ctx.bot.user else None)
     await ctx.reply(embed=embed, mention_author=False)
 
 
-@bot.command(name="sinfo", aliases=["serverinfo", "server-info"])
+@bot.command(name="server", aliases=["sinfo", "serverinfo", "server-info"])
 @commands.guild_only()
 async def server_info_command(ctx):
     guild = ctx.guild
@@ -1575,16 +1575,18 @@ async def server_info_command(ctx):
         inline=False
     )
     embed.add_field(name="🆔 Server ID", value=f"`{guild.id}`", inline=False)
-    banner_url = _approved_embed_banner(bot.user, guild=guild)
-    embed.set_footer(text=f"🛡️ $pyX Security • Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
-    await _send_banner_card(ctx, embed, banner_url=banner_url, guild=guild)
+    # This command is server information; show only this guild's banner, never the bot banner.
+    if guild.banner is not None:
+        embed.set_image(url=guild.banner.url)
+    embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+    await ctx.reply(embed=embed, mention_author=False)
 
 
 class BotInfoCategorySelect(discord.ui.Select):
     def __init__(self, ctx):
         self.ctx = ctx
         options = [
-            discord.SelectOption(label="Home", value="home", description="Overview of $pyX Security", default=True),
+            discord.SelectOption(label="Home", value="home", description="Overview of Kanade", default=True),
             discord.SelectOption(label="Security", value="security", description="Anti-nuke, anti-raid, and whitelist"),
             discord.SelectOption(label="Moderation", value="moderation", description="Member moderation and channel controls"),
             discord.SelectOption(label="Backups & Logs", value="backups", description="Backups, logs, and customization"),
@@ -1629,9 +1631,9 @@ class BotInfoView(discord.ui.View):
         description = _arrow_lines(description)
         self.embed = StyledEmbed(title=title, description=description, color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
         if bot_user:
-            self.embed.set_author(name="$pyX Security", icon_url=bot_user.display_avatar.url)
+            self.embed.set_author(name="Kanade", icon_url=bot_user.display_avatar.url)
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
-            self.embed.set_footer(text="🛡️ $pyX Security • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
+            self.embed.set_footer(text="🛡️ Kanade • Developed by SPYWXRE", icon_url=bot_user.display_avatar.url)
         for item in self.children:
             if isinstance(item, BotInfoCategorySelect):
                 for option in item.options:
@@ -1725,7 +1727,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         return await ctx.reply("Use this command in a server.", mention_author=False)
     if not has_admin_access(ctx.author):
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Permission Denied",
+            title="🛡️ Kanade | Permission Denied",
             description="Server admins only.",
             color=discord.Color.from_rgb(128, 0, 255),
         )
@@ -1773,17 +1775,17 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
         else:
             label = "Server-specific profile picture"
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Profile Updated",
+            title="🛡️ Kanade | Profile Updated",
             description=f"Updated the bot profile for **{ctx.guild.name}**.",
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow(),
         )
         embed.set_image(url=ctx.message.attachments[0].url if ctx.message.attachments else image_url)
-        embed.set_footer(text="$pyX Security • Developed by spywxre", icon_url=bot.user.display_avatar.url if bot.user else None)
+        embed.set_footer(text="Kanade • Developed by spywxre", icon_url=bot.user.display_avatar.url if bot.user else None)
         await ctx.reply(embed=embed, mention_author=False)
     except ValueError as exc:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Invalid Image",
+            title="🛡️ Kanade | Invalid Image",
             description=str(exc),
             color=discord.Color.from_rgb(128, 0, 255),
         )
@@ -1799,7 +1801,7 @@ async def change_guild_profile_image(ctx, field_name, image_url=None):
     except discord.HTTPException as exc:
         logger.warning("Discord rejected server-specific profile change: %r", exc)
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Profile Update Failed",
+            title="🛡️ Kanade | Profile Update Failed",
             description=(
                 "Discord rejected the profile change. Check that the image is supported and that Discord "
                 "allows guild-specific profile banners for this bot. "
@@ -1837,7 +1839,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
 
     if not arguments.strip():
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Steal Emoji",
+            title="🛡️ Kanade | Steal Emoji",
             description=(
                 "Mention a custom emoji from another server.\n"
                 "Usage: `!steal <:emoji_name:emoji_id>`\n"
@@ -1856,7 +1858,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
     )
     if not can_manage:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Permission Denied",
+            title="🛡️ Kanade | Permission Denied",
             description="You need Manage Expressions permission.",
             color=purple,
         )
@@ -1870,7 +1872,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
     )
     if not bot_can_manage:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Missing Permission",
+            title="🛡️ Kanade | Missing Permission",
             description="I need Manage Expressions permission.",
             color=purple,
         )
@@ -1879,7 +1881,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
     matches = list(_CUSTOM_EMOJI_RE.finditer(arguments))
     if not matches:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | No Custom Emoji Found",
+            title="🛡️ Kanade | No Custom Emoji Found",
             description=(
                 "Mention a custom Discord emoji to copy it."
             ),
@@ -1948,7 +1950,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
                 failures.append(f"`{original_name}` — Discord rejected it: {detail[:180]}")
 
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Emoji Import Results",
+        title="🛡️ Kanade | Emoji Import Results",
         description=f"Copied **{len(success_names)}/{len(unique_matches)}** emoji(s).",
         color=purple,
         timestamp=discord.utils.utcnow(),
@@ -1957,7 +1959,7 @@ async def steal_custom_emoji(ctx, *, arguments: str = ""):
         embed.add_field(name="Added", value="\n".join(success_names)[:1024], inline=False)
     if failures:
         embed.add_field(name="Not Added", value="\n".join(failures)[:1024], inline=False)
-    embed.set_footer(text="$pyX Security • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by spywxre")
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -1971,7 +1973,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
 
     if not has_admin_access(ctx.author):
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Permission Denied",
+            title="🛡️ Kanade | Permission Denied",
             description="Server admins only.",
             color=purple,
         )
@@ -1982,7 +1984,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         return await ctx.reply("I couldn't find my member profile in this server.", mention_author=False)
     if not bot_member.guild_permissions.change_nickname:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Missing Permission",
+            title="🛡️ Kanade | Missing Permission",
             description="I need Change Nickname permission.",
             color=purple,
         )
@@ -1991,7 +1993,7 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
     reset = nickname.strip().casefold() == "reset"
     new_nickname = None if reset else nickname.strip()
     if not reset and not new_nickname:
-        return await ctx.reply("Provide a nickname, for example `!cn $pyX Guardian`, or use `!cn reset`.", mention_author=False)
+        return await ctx.reply("Provide a nickname, for example `!cn Kanade Guardian`, or use `!cn reset`.", mention_author=False)
     if new_nickname is not None and len(new_nickname) > 32:
         return await ctx.reply("Discord nicknames must be 32 characters or fewer.", mention_author=False)
 
@@ -2002,11 +2004,11 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
         )
     except discord.Forbidden:
         description = "Nickname change failed. Check my permissions and role position."
-        embed = StyledEmbed(title="🛡️ $pyX Security | Nickname Change Failed", description=description, color=purple)
+        embed = StyledEmbed(title="🛡️ Kanade | Nickname Change Failed", description=description, color=purple)
         return await ctx.reply(embed=embed, mention_author=False)
     except discord.HTTPException as exc:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Nickname Change Failed",
+            title="🛡️ Kanade | Nickname Change Failed",
             description="Could not update nickname. Check permissions.",
             color=purple,
         )
@@ -2017,12 +2019,12 @@ async def change_bot_server_nickname(ctx, *, nickname: str):
     else:
         description = f"My server nickname in **{ctx.guild.name}** is now **{discord.utils.escape_markdown(new_nickname)}**."
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Nickname Updated",
+        title="🛡️ Kanade | Nickname Updated",
         description=description,
         color=purple,
         timestamp=discord.utils.utcnow(),
     )
-    embed.set_footer(text="$pyX Security • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by spywxre")
     await ctx.reply(embed=embed, mention_author=False)
 
 # ==================== AFK SYSTEM ====================
@@ -2035,7 +2037,7 @@ async def purge_command(ctx, target: str = None, amount: int = None):
 
     async def purge_embed(title, description, *, color=purple, delete_after=10):
         embed = StyledEmbed(
-            title=f"$pyX Security | {title}",
+            title=f"Kanade | {title}",
             description=description,
             color=color,
             timestamp=discord.utils.utcnow()
@@ -2151,7 +2153,7 @@ async def purge_command(ctx, target: str = None, amount: int = None):
                     deleted_count += 1
 
         result = StyledEmbed(
-            title="$pyX Security | Purge Complete",
+            title="Kanade | Purge Complete",
             description=f"Deleted **{deleted_count:,}** message(s). ({mode_text})",
             color=purple,
             timestamp=discord.utils.utcnow()
@@ -2189,14 +2191,14 @@ async def afk_command(ctx, *, message="AFK"):
         "since": discord.utils.utcnow()
     }
     embed = StyledEmbed(
-        title="$pyX Security | AFK Enabled",
+        title="Kanade | AFK Enabled",
         description=(
             f"{ctx.author.mention} is now AFK: {discord.utils.escape_markdown(afk_message)}"
         ),
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text="$pyX Security")
+    embed.set_footer(text="Kanade")
     await ctx.reply(embed=embed, mention_author=False)
 # ==================== PREFIX / NO-PREFIX ACCESS HELPER ====================
 def has_no_prefix_access(message):
@@ -2274,7 +2276,7 @@ async def afk_message_listener(message):
         else:
             duration = f"{seconds}s"
         embed = StyledEmbed(
-            title="$pyX Security | AFK Removed",
+            title="Kanade | AFK Removed",
             description=(
                 f"Welcome back, {message.author.mention}!\n\n"
                 "Your AFK status has been removed automatically because you sent a message.\n\n"
@@ -2284,7 +2286,7 @@ async def afk_message_listener(message):
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow()
         )
-        embed.set_footer(text="$pyX Security")
+        embed.set_footer(text="Kanade")
         try:
             await message.channel.send(
                 embed=embed,
@@ -2304,7 +2306,7 @@ async def afk_message_listener(message):
         afk_data = afk_users[key]
         since = discord.utils.format_dt(afk_data["since"], style="R")
         embed = StyledEmbed(
-            title=f"$pyX Security | {mentioned_user.display_name} is AFK",
+            title=f"Kanade | {mentioned_user.display_name} is AFK",
             description=(
                 f"**Message:** {discord.utils.escape_markdown(afk_data['message'])}\n"
                 f"**Since:** {since}"
@@ -2312,7 +2314,7 @@ async def afk_message_listener(message):
             color=discord.Color.from_rgb(128, 0, 255),
             timestamp=discord.utils.utcnow()
         )
-        embed.set_footer(text="$pyX Security")
+        embed.set_footer(text="Kanade")
         try:
             await message.channel.send(embed=embed)
         except discord.HTTPException:
@@ -2610,12 +2612,12 @@ def role_embed(title, description, color=None):
     if color is None:
         color = discord.Color.from_rgb(128, 0, 255)
     embed = StyledEmbed(
-        title=f"$pyX Security | {title}",
+        title=f"Kanade | {title}",
         description=description,
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text="$pyX Security")
+    embed.set_footer(text="Kanade")
     return embed
 
 def find_role_by_name(guild, role_name):
@@ -2818,7 +2820,7 @@ async def security_command(ctx):
         "guild_whitelists", {}
     ).get(str(ctx.guild.id), [])
     embed = StyledEmbed(
-        title="$pyX Security Status",
+        title="Kanade Status",
         color=discord.Color.green()
     )
     embed.add_field(
@@ -2851,33 +2853,33 @@ async def prefix_command(ctx, *, new_prefix: str = None):
 
     if not is_owner_id(ctx.author.id) and ctx.author.id not in premium_admin_ids and not is_premium_guild(ctx.guild):
         embed = StyledEmbed(
-            title="$pyX Security | Premium Feature",
+            title="Kanade | Premium Feature",
             description=(
                 "Custom prefixes require Premium."
             ),
             color=purple
         )
-        embed.set_footer(text="$pyX Security • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by spywxre")
         return await ctx.reply(embed=embed, mention_author=False)
 
     if not has_admin_access(ctx.author) and not is_owner_id(ctx.author.id):
         embed = StyledEmbed(
-            title="$pyX Security | Permission Denied",
+            title="Kanade | Permission Denied",
             description="Administrator permission required.",
             color=purple
         )
-        embed.set_footer(text="$pyX Security • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by spywxre")
         return await ctx.reply(embed=embed, mention_author=False)
 
     if new_prefix is None:
         embed = StyledEmbed(
-            title="$pyX Security | Server Prefix",
+            title="Kanade | Server Prefix",
             description=(
                 f"Prefix: `{current_prefix}`\nUsage: `{current_prefix}prefix <new_prefix>`"
             ),
             color=purple
         )
-        embed.set_footer(text="$pyX Security • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by spywxre")
         return await ctx.reply(embed=embed, mention_author=False)
 
     new_prefix = new_prefix.strip()
@@ -2885,19 +2887,19 @@ async def prefix_command(ctx, *, new_prefix: str = None):
             or any(char.isspace() for char in new_prefix)
             or "\n" in new_prefix or "\r" in new_prefix):
         embed = StyledEmbed(
-            title="$pyX Security | Invalid Prefix",
+            title="Kanade | Invalid Prefix",
             description=(
                 "Use 1–32 characters with no spaces. Example: `!` or `$`."
             ),
             color=purple
         )
-        embed.set_footer(text="$pyX Security • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by spywxre")
         return await ctx.reply(embed=embed, mention_author=False)
 
     config.setdefault("guild_prefixes", {})[guild_key] = new_prefix
     save_config()
     embed = StyledEmbed(
-        title="$pyX Security | Prefix Updated",
+        title="Kanade | Prefix Updated",
         description=(
             f"Prefix changed to `{new_prefix}`. Use `{new_prefix}help`."
         ),
@@ -2905,7 +2907,7 @@ async def prefix_command(ctx, *, new_prefix: str = None):
     )
     embed.add_field(name="Previous prefix", value=f"`{current_prefix}`", inline=True)
     embed.add_field(name="New prefix", value=f"`{new_prefix}`", inline=True)
-    embed.set_footer(text="$pyX Security • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by spywxre")
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -2924,7 +2926,7 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     action = (action or "help").lower()
     if action in ("help", "status"):
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Premium Manager",
+            title="🛡️ Kanade | Premium Manager",
             description=(
                 "`!premium add [server_id]` — Enable Premium\n`!premium remove [server_id]` — Remove Premium\n`!premium list` — List Premium servers"
             ),
@@ -2946,11 +2948,11 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
             if len(listing) > 3900:
                 listing = listing[:3850].rsplit("\n", 1)[0] + "\n… list shortened to fit Discord's embed limit."
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Premium Servers",
+            title="🛡️ Kanade | Premium Servers",
             description=listing,
             color=discord.Color.from_rgb(128, 0, 255),
         )
-        embed.set_footer(text=f"$pyX Security • {len(ids)} Premium server(s)")
+        embed.set_footer(text=f"Kanade • {len(ids)} Premium server(s)")
         return await ctx.reply(embed=embed, mention_author=False)
 
     if action not in ("add", "remove"):
@@ -2983,12 +2985,12 @@ async def premium_command(ctx, action: str = None, guild_id: str = None):
     config["premium_guilds"] = list(config["premium_guild_ids"])
     save_config()
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Premium Updated",
+        title="🛡️ Kanade | Premium Updated",
         description=message,
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
     )
-    embed.set_footer(text="$pyX Security • Premium Manager")
+    embed.set_footer(text="Kanade • Premium Manager")
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -3006,7 +3008,7 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
     action = (action or "help").lower()
     if action not in ("add", "remove") or user is None:
         embed = StyledEmbed(
-            title="🛡️ $pyX Security | Premium Admin Manager",
+            title="🛡️ Kanade | Premium Admin Manager",
             description=(
                 "`!adm add @user` — Grant bot-admin access to restricted commands and Premium features\n"
                 "`!adm remove @user` — Remove that bypass access\n"
@@ -3038,12 +3040,12 @@ async def premium_admin_command(ctx, action: str = None, user: discord.User = No
     config["premium_admin_ids"] = [owner_id] + [uid for uid in admin_ids if uid != owner_id]
     save_config()
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Admin List Updated",
+        title="🛡️ Kanade | Admin List Updated",
         description=message,
         color=discord.Color.from_rgb(128, 0, 255),
         timestamp=discord.utils.utcnow(),
     )
-    embed.set_footer(text="$pyX Security • Developer / Staff")
+    embed.set_footer(text="Kanade • Developer / Staff")
     await ctx.reply(embed=embed, mention_author=False)
 
 
@@ -3081,7 +3083,7 @@ async def premium_admin_list_command(ctx):
     purple = discord.Color.from_rgb(35, 0, 55)
 
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Staff List",
+        title="🛡️ Kanade | Staff List",
         description=(
             "Need help with Premium access? Contact the developer or an authorized staff member for support and assistance."
         ),
@@ -3136,21 +3138,21 @@ async def antinuke_command(ctx, mode: str = None):
     if mode not in ("on", "off"):
         enabled = bool(get_guild_setting(ctx.guild, "antinuke_enabled", config.get("antinuke_enabled", True)))
         embed = StyledEmbed(
-            title="$pyX Security | Anti-Nuke",
+            title="Kanade | Anti-Nuke",
             description=(
                 f"Anti-nuke protection is currently **{'ON' if enabled else 'OFF'}**.\n\n"
                 "Use `!antinuke on` to enable protection or `!antinuke off` to disable it."
             ),
             color=purple
         )
-        embed.set_footer(text="$pyX Security • Developed by spywxre")
+        embed.set_footer(text="Kanade • Developed by spywxre")
         return await ctx.reply(embed=embed, mention_author=False)
 
     enabled = mode == "on"
     set_guild_setting(ctx.guild, "antinuke_enabled", enabled)
 
     embed = StyledEmbed(
-        title=f"$pyX Security | Anti-Nuke {'Enabled' if enabled else 'Disabled'}",
+        title=f"Kanade | Anti-Nuke {'Enabled' if enabled else 'Disabled'}",
         description=(
             f"🛡️ Anti-nuke protection has been **{'ENABLED' if enabled else 'DISABLED'}** "
             f"for **{ctx.guild.name}**."
@@ -3167,7 +3169,7 @@ async def antinuke_command(ctx, mode: str = None):
         value=ctx.author.mention,
         inline=True
     )
-    embed.set_footer(text="$pyX Security • Developed by spywxre")
+    embed.set_footer(text="Kanade • Developed by spywxre")
     await ctx.reply(embed=embed, mention_author=False)
 # ==================== PER-SERVER PREFIX WHITELIST ====================
 @bot.group(name="whitelist", invoke_without_command=True)
@@ -3237,7 +3239,7 @@ async def whitelist_list(ctx):
         str(ctx.guild.id), []
     )
     embed = StyledEmbed(
-        title="$pyX Security | Whitelist",
+        title="Kanade | Whitelist",
         description=f"Whitelisted members in **{ctx.guild.name}**",
         color=discord.Color.from_rgb(128, 0, 255)
     )
@@ -3266,7 +3268,7 @@ async def whitelist_list(ctx):
         value=str(len(user_ids)),
         inline=False
     )
-    embed.set_footer(text="$pyX Security")
+    embed.set_footer(text="Kanade")
     await ctx.reply(embed=embed, mention_author=False)
 # ==================== ADDED SERVER TOOLS ====================
 PURPLE = discord.Color.from_rgb(128, 0, 255)
@@ -3274,8 +3276,8 @@ BACKUP_DIR = "backups"
 
 
 def feature_embed(title, description, *, color=PURPLE):
-    embed = StyledEmbed(title=f"🛡️ $pyX Security | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
-    embed.set_footer(text="$pyX Security")
+    embed = StyledEmbed(title=f"🛡️ Kanade | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
+    embed.set_footer(text="Kanade")
     return embed
 
 
@@ -3409,7 +3411,7 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
                 existing = await guild.create_role(
                     name=item["name"], permissions=discord.Permissions(int(item.get("permissions", 0))),
                     colour=discord.Colour(int(item.get("color", 0))), hoist=bool(item.get("hoist", False)),
-                    mentionable=bool(item.get("mentionable", False)), reason="$pyX Premium backup restore"
+                    mentionable=bool(item.get("mentionable", False)), reason="Kanade Premium backup restore"
                 )
             except (discord.Forbidden, discord.HTTPException) as exc:
                 continue
@@ -3423,7 +3425,7 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
         current_channels.sort(key=lambda channel: isinstance(channel, discord.CategoryChannel))
         for channel in current_channels:
             try:
-                await channel.delete(reason="$pyX backup restore: replacing channels with selected backup")
+                await channel.delete(reason="Kanade backup restore: replacing channels with selected backup")
             except (discord.Forbidden, discord.HTTPException) as exc:
                 raise RuntimeError(
                     f"Could not delete existing channel/category `{channel.name}`. "
@@ -3457,7 +3459,7 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
         try:
             if existing is None:
                 ctype = item.get("type")
-                common = {"name": item["name"], "category": category, "overwrites": overwrites, "reason": "$pyX Premium backup restore"}
+                common = {"name": item["name"], "category": category, "overwrites": overwrites, "reason": "Kanade Premium backup restore"}
                 if ctype == "category":
                     existing = await guild.create_category(item["name"], overwrites=overwrites, reason=common["reason"])
                 elif ctype == "voice":
@@ -3472,7 +3474,7 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
             else:
                 # Apply saved overwrites to listed targets without deleting unrelated extra overwrites.
                 for target, overwrite in overwrites.items():
-                    await existing.set_permissions(target, overwrite=overwrite, reason="$pyX Premium backup restore")
+                    await existing.set_permissions(target, overwrite=overwrite, reason="Kanade Premium backup restore")
                 channel_map[old_id] = existing
         except (discord.Forbidden, discord.HTTPException, TypeError, ValueError) as exc:
             logger.warning("Backup restore could not create channel %s in %s: %s", item.get("name"), guild.id, exc)
@@ -3750,7 +3752,7 @@ async def snipe_command(ctx):
     embed = feature_embed("Recently Deleted Message", f"**Author:** {item['author_name']} (`{item['author_id']}`)\n**Content:**\n{item['content'][:2500]}")
     if item.get("attachments"):
         embed.add_field(name="Attachments", value="\n".join(item["attachments"])[:1000], inline=False)
-    embed.set_footer(text="$pyX Security")
+    embed.set_footer(text="Kanade")
     await ctx.reply(embed=embed, mention_author=False)
 
 @bot.command(name="np")
@@ -3842,7 +3844,7 @@ antinuke_group = app_commands.Group(
 )
 async def slash_antinuke_status(interaction: discord.Interaction):
     embed = StyledEmbed(
-        title="$pyX Security Status",
+        title="Kanade Status",
         color=discord.Color.blurple()
     )
     embed.add_field(
@@ -3897,13 +3899,13 @@ async def slash_antinuke_off(interaction: discord.Interaction):
 bot.tree.add_command(antinuke_group)
 @bot.tree.command(
     name="status",
-    description="Show $pyX status"
+    description="Show Kanade status"
 )
 async def slash_status(interaction: discord.Interaction):
     guild = interaction.guild
     antinuke_state = get_guild_setting(guild, "antinuke_enabled", config.get("antinuke_enabled", True)) if guild else config.get("antinuke_enabled", True)
     await interaction.response.send_message(
-        f"**$pyX online**\n"
+        f"**Kanade online**\n"
         f"Servers protected: `{len(bot.guilds)}`\n"
         f"Anti-nuke: `{'ON' if antinuke_state else 'OFF'}`",
         ephemeral=True
@@ -4119,7 +4121,7 @@ async def slash_whitelist(
     # LIST
     if action.value == "list":
         embed = StyledEmbed(
-            title="$pyX Security | Whitelist",
+            title="Kanade | Whitelist",
             description=f"Whitelisted members in **{guild.name}**",
             color=discord.Color.from_rgb(128, 0, 255)
         )
@@ -4148,7 +4150,7 @@ async def slash_whitelist(
             value=str(len(user_ids)),
             inline=False
         )
-        embed.set_footer(text="$pyX Security")
+        embed.set_footer(text="Kanade")
         return await interaction.response.send_message(
             embed=embed,
             ephemeral=True
@@ -4199,7 +4201,7 @@ async def slash_whitelist(
         ephemeral=True
     )
 # ==================== ADDITIONAL SLASH COMMAND COVERAGE ====================
-@bot.tree.command(name="commands", description="List the available $pyX Security slash commands")
+@bot.tree.command(name="commands", description="List the available Kanade slash commands")
 async def slash_commands(interaction: discord.Interaction):
     description = (
         "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`\n\n"
@@ -4208,14 +4210,14 @@ async def slash_commands(interaction: discord.Interaction):
         "**Bot staff:** `/premium`, `/np`, `/npremove`, `/gnp`, `/gnpremove`, `/generatelink`, `/serverlists`\n\n"
         "Prefix commands remain available. Use `/help` if it is registered by your client, or `!help` / your server prefix plus `help` for the full guide."
     )
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | Slash Commands", description), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Kanade | Slash Commands", description), ephemeral=True)
 
 @bot.tree.command(name="security", description="Show this server's protection status")
 async def slash_security(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-    embed = feature_embed("$pyX Security | Server Protection",
+    embed = feature_embed("Kanade | Server Protection",
         f"Anti-nuke: **{'ON' if get_guild_setting(guild, 'antinuke_enabled', config.get('antinuke_enabled', True)) else 'OFF'}**")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -4226,7 +4228,7 @@ async def slash_afk(interaction: discord.Interaction, message: str = "AFK"):
     if guild is None:
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
     afk_users[(guild.id, interaction.user.id)] = {"message": message[:500], "since": discord.utils.utcnow()}
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | AFK Enabled", f"You are now AFK: {discord.utils.escape_markdown(message[:500])}"), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Kanade | AFK Enabled", f"You are now AFK: {discord.utils.escape_markdown(message[:500])}"), ephemeral=True)
 
 @bot.tree.command(name="kick", description="Kick a member from this server")
 @app_commands.describe(member="Member to kick", reason="Reason for the kick")
@@ -4352,7 +4354,7 @@ async def slash_snipe(interaction: discord.Interaction):
     data = recent_deleted_messages.get(interaction.channel.id)
     if not data:
         return await interaction.response.send_message("No recently deleted message is stored for this channel.", ephemeral=True)
-    embed = feature_embed("$pyX Security | Snipe", f"**Author:** {data.get('author', 'Unknown')}\n**Message:** {discord.utils.escape_markdown(data.get('content') or '[No text content]')}")
+    embed = feature_embed("Kanade | Snipe", f"**Author:** {data.get('author', 'Unknown')}\n**Message:** {discord.utils.escape_markdown(data.get('content') or '[No text content]')}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="prefix", description="View or change this server's command prefix")
@@ -4377,7 +4379,7 @@ async def slash_prefix(interaction: discord.Interaction, new_prefix: str = None)
 async def slash_info(interaction: discord.Interaction):
     user = bot.user
     embed = feature_embed(
-        "$pyX Security | Bot Information",
+        "Kanade | Bot Information",
         "A Discord security and moderation toolkit. Use `/help` or the server's configured prefix to view command guidance."
     )
     embed.add_field(
@@ -4423,7 +4425,7 @@ async def slash_info(interaction: discord.Interaction):
     )
     if user:
         embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text="$pyX Security • Developed by spywxre", icon_url=user.display_avatar.url if user else None)
+    embed.set_footer(text="Kanade • Developed by spywxre", icon_url=user.display_avatar.url if user else None)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="serverinfo", description="Show information about this server")
@@ -4431,7 +4433,7 @@ async def slash_serverinfo(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-    embed = feature_embed(f"$pyX Security | {guild.name}",
+    embed = feature_embed(f"Kanade | {guild.name}",
         f"**Server ID:** `{guild.id}`\n**Owner:** <@{guild.owner_id}>\n**Members:** `{guild.member_count or 0}`\n**Text channels:** `{len(guild.text_channels)}`\n**Voice channels:** `{len(guild.voice_channels)}`\n**Categories:** `{len(guild.categories)}`\n**Roles:** `{len(guild.roles)}`\n**Created:** <t:{int(guild.created_at.timestamp())}:D>")
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
@@ -4444,7 +4446,7 @@ async def slash_avatar(interaction: discord.Interaction, user: discord.User = No
         return await interaction.response.send_message(embed=feature_embed("Premium Required", "Avatar lookup is available in Premium-enabled servers.", color=discord.Color.orange()), ephemeral=True)
     target = user or interaction.user
     avatar_url = target.display_avatar.url
-    embed = feature_embed(f"$pyX Security | Avatar — {discord.utils.escape_markdown(target.name)}", f"**User ID:** `{target.id}`\n[Open full-size avatar]({avatar_url})")
+    embed = feature_embed(f"Kanade | Avatar — {discord.utils.escape_markdown(target.name)}", f"**User ID:** `{target.id}`\n[Open full-size avatar]({avatar_url})")
     embed.set_image(url=avatar_url)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -4480,7 +4482,7 @@ async def slash_admlist(interaction: discord.Interaction):
     ordered_ids = [owner_id] + [uid for uid in admin_ids if uid != owner_id]
     purple = discord.Color.from_rgb(35, 0, 55)
     embed = StyledEmbed(
-        title="🛡️ $pyX Security | Staff List",
+        title="🛡️ Kanade | Staff List",
         description="Need help with Premium access? Contact the developer or an authorized staff member for support and assistance.",
         color=purple,
         timestamp=discord.utils.utcnow(),
@@ -4540,7 +4542,7 @@ async def slash_premium(interaction: discord.Interaction, action: app_commands.C
     config["premium_guild_ids"] = sorted(current)
     config["premium_guilds"] = sorted(current)
     save_config()
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | Premium Manager", text_value), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Kanade | Premium Manager", text_value), ephemeral=True)
 
 @bot.tree.command(name="np", description="Allow a user to use commands without a prefix in this server")
 @app_commands.describe(user="User to authorize")
@@ -4587,7 +4589,7 @@ async def slash_serverlists(interaction: discord.Interaction):
         return await interaction.response.send_message("Global bot staff only.", ephemeral=True)
     lines = [f"• **{g.name}** — `{g.id}` — {g.member_count or 0} members" for g in sorted(bot.guilds, key=lambda x: x.name.lower())]
     description = "\n".join(lines) if lines else "The bot is not in any servers."
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | Connected Servers", description[:4000]), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Kanade | Connected Servers", description[:4000]), ephemeral=True)
 
 @bot.tree.command(name="generatelink", description="Generate an invite for a server the bot has joined")
 @app_commands.describe(server_id="ID of a server the bot is in")
@@ -4612,7 +4614,7 @@ async def slash_generatelink(interaction: discord.Interaction, server_id: str):
 @bot.tree.command(name="help", description="Show the command guide")
 async def slash_help(interaction: discord.Interaction):
     await interaction.response.send_message(embed=feature_embed(
-        "$pyX Security | Command Guide",
+        "Kanade | Command Guide",
         "Use `/commands` for the slash command index.\n\n"
         "**Server Protection:** `/antinuke`, `/security`, `/lockdown`, `/unlockdown`, `!antispam on/off/status`, `!antispam settings <setting> <value>`, `!antilink on/off/status`, `!antilink allow <domain>`, `!antilink deny <domain>`, `!antilink exempt @member`.\n"
         "**Moderation:** `/kick`, `/ban`, `/unban`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`.\n"
@@ -4623,7 +4625,7 @@ async def slash_help(interaction: discord.Interaction):
 async def slash_admhelp(interaction: discord.Interaction):
     if not is_global_staff(interaction.user):
         return await interaction.response.send_message("Bot staff only.", ephemeral=True)
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | Bot Staff Guide", "`/premium` — manage Premium server access\n`/adm` — grant/revoke bot-admin access\n`/admlist` and `/adminlist` — list staff\n`/np`, `/npremove` — per-server no-prefix access\n`/gnp`, `/gnpremove` — global no-prefix access\n`/serverlists` — list connected servers\n`/generatelink` — generate a server invite"), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Kanade | Bot Staff Guide", "`/premium` — manage Premium server access\n`/adm` — grant/revoke bot-admin access\n`/admlist` and `/adminlist` — list staff\n`/np`, `/npremove` — per-server no-prefix access\n`/gnp`, `/gnpremove` — global no-prefix access\n`/serverlists` — list connected servers\n`/generatelink` — generate a server invite"), ephemeral=True)
 
 @bot.tree.command(name="adm", description="Grant or revoke bot-admin access (developer only)")
 @app_commands.choices(action=[app_commands.Choice(name="add", value="add"), app_commands.Choice(name="remove", value="remove")])
@@ -4643,7 +4645,7 @@ async def slash_adm(interaction: discord.Interaction, action: app_commands.Choic
         message = f"Bot-admin access revoked for {user.mention}."
     config["premium_admin_ids"] = [DEVELOPER_ID] + [x for x in ids if x != DEVELOPER_ID]
     save_config()
-    await interaction.response.send_message(embed=feature_embed("$pyX Security | Bot Admin Updated", message), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Kanade | Bot Admin Updated", message), ephemeral=True)
 
 async def slash_change_profile(interaction: discord.Interaction, field_name: str, attachment: discord.Attachment):
     guild = interaction.guild
@@ -4670,7 +4672,7 @@ async def slash_change_profile(interaction: discord.Interaction, field_name: str
         route = discord.http.Route("PATCH", "/guilds/{guild_id}/members/@me", guild_id=guild.id)
         await bot.http.request(route, json={field_name: image_uri})
         label = "server-specific profile banner" if field_name == "banner" else "server-specific profile picture"
-        await interaction.followup.send(embed=feature_embed("$pyX Security | Profile Updated", f"Updated the bot's {label} in **{guild.name}**."), ephemeral=True)
+        await interaction.followup.send(embed=feature_embed("Kanade | Profile Updated", f"Updated the bot's {label} in **{guild.name}**."), ephemeral=True)
     except (discord.HTTPException, TypeError, aiohttp.ClientError) as exc:
         await interaction.followup.send(f"Profile update failed. Check image support and bot permissions. Details: {str(exc)[:500]}", ephemeral=True)
 
@@ -4702,7 +4704,7 @@ async def slash_botnick(interaction: discord.Interaction, nickname: str):
         return await interaction.response.send_message("Nickname must be 1-32 characters, or use `reset`.", ephemeral=True)
     try:
         await bot_member.edit(nick=new_nickname, reason=f"Nickname changed by {interaction.user} ({interaction.user.id})")
-        await interaction.response.send_message(embed=feature_embed("$pyX Security | Nickname Updated", f"Bot nickname {'reset' if new_nickname is None else 'changed to **' + discord.utils.escape_markdown(new_nickname) + '**'}."), ephemeral=True)
+        await interaction.response.send_message(embed=feature_embed("Kanade | Nickname Updated", f"Bot nickname {'reset' if new_nickname is None else 'changed to **' + discord.utils.escape_markdown(new_nickname) + '**'}."), ephemeral=True)
     except discord.HTTPException as exc:
         await interaction.response.send_message(f"Nickname update failed: {str(exc)[:500]}", ephemeral=True)
 
@@ -4736,7 +4738,7 @@ async def slash_steal(interaction: discord.Interaction, emoji: str, name: str = 
         if not data or len(data) > 10 * 1024 * 1024:
             return await interaction.followup.send("Emoji image is empty or exceeds 10 MB.", ephemeral=True)
         created = await guild.create_custom_emoji(name=new_name, image=data, reason=f"Emoji copied by {interaction.user} ({interaction.user.id})")
-        await interaction.followup.send(embed=feature_embed("$pyX Security | Emoji Added", f"Added {created} as `{created.name}`."), ephemeral=True)
+        await interaction.followup.send(embed=feature_embed("Kanade | Emoji Added", f"Added {created} as `{created.name}`."), ephemeral=True)
     except (aiohttp.ClientError, asyncio.TimeoutError, discord.HTTPException) as exc:
         await interaction.followup.send(f"Could not add the emoji. Check permissions and emoji capacity. {str(exc)[:300]}", ephemeral=True)
 
@@ -4841,10 +4843,10 @@ async def antispam_message_listener(message):
             return
         try:
             if len(candidates) >= 2 and hasattr(message.channel, "delete_messages"):
-                await message.channel.delete_messages(candidates, reason="$pyX Security anti-spam cleanup")
+                await message.channel.delete_messages(candidates, reason="Kanade anti-spam cleanup")
                 deleted += len(candidates)
             else:
-                await candidates[0].delete(reason="$pyX Security anti-spam cleanup")
+                await candidates[0].delete(reason="Kanade anti-spam cleanup")
                 deleted += 1
         except discord.NotFound:
             # Some messages may already have been deleted by a moderator/other bot.
@@ -4857,7 +4859,7 @@ async def antispam_message_listener(message):
             logger.warning("Anti-spam bulk delete failed in guild %s: %s; falling back", guild.id, error)
             for spam_message in candidates:
                 try:
-                    await spam_message.delete(reason="$pyX Security anti-spam cleanup")
+                    await spam_message.delete(reason="Kanade anti-spam cleanup")
                     deleted += 1
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     continue
@@ -4873,7 +4875,7 @@ async def antispam_message_listener(message):
         try:
             await member.timeout(
                 timedelta(seconds=timeout_seconds),
-                reason=f"$pyX Security anti-spam: {reason}"
+                reason=f"Kanade anti-spam: {reason}"
             )
             timed_out = True
         except (discord.Forbidden, discord.HTTPException) as error:
