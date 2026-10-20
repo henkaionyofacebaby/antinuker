@@ -569,15 +569,51 @@ def permissions_became_dangerous(before, after):
         for permission in DANGEROUS_PERMISSIONS
     )
 # ==================== LOGGING ====================
+LOG_CHANNEL_DEFINITIONS = {
+    "anti_nuke": ("anti-nuke-logs", "Anti Nuke Logs", "Anti-nuke detections, suspicious actions, and protection responses."),
+    "message": ("message-logs", "Message Logs", "Message edits, deletions, and message-related events."),
+    "server": ("server-logs", "Server Logs", "Server and channel updates, invites not otherwise categorized, and general events."),
+    "voice": ("voice-logs", "Voice Logs", "Voice channel joins, leaves, and switches."),
+    "invite": ("invite-logs", "Invite Logs", "Invite creation and invite-related events."),
+    "member": ("member-logs", "Member Logs", "Member joins, leaves, and member updates."),
+    "role": ("role-logs", "Role Logs", "Role creation, deletion, updates, and member role changes."),
+    "moderation": ("moderation-logs", "Moderation Logs", "Kicks, bans, unbans, timeouts, and other moderation actions."),
+    "automod": ("automod-logs", "AutoMod Logs", "Anti-spam, anti-link, and automated moderation actions."),
+}
+
+def _log_group_for(title, description=""):
+    text = f"{title} {description}".lower()
+    if any(word in text for word in ("anti-nuke", "antinuke", "nuke", "dangerous permission", "mass delete", "raid detected", "suspicious action", "protection triggered")):
+        return "anti_nuke"
+    if any(word in text for word in ("anti-spam", "antispam", "anti-link", "antilink", "automod", "spam action", "blocked domain", "link filtering")):
+        return "automod"
+    if any(word in text for word in ("message edited", "message deleted", "message bulk", "deleted message")):
+        return "message"
+    if any(word in text for word in ("voice", "joined vc", "left vc", "switched vc")):
+        return "voice"
+    if "invite" in text:
+        return "invite"
+    if any(word in text for word in ("role", "permission updated", "permissions updated")):
+        return "role"
+    if any(word in text for word in ("member joined", "member left", "member updated", "member roles", "possible join raid", "user joined", "user left")):
+        return "member"
+    if any(word in text for word in ("banned", "unbanned", "kicked", "timeout", "muted", "warned", "purge", "lockdown", "moderation")):
+        return "moderation"
+    return "server"
+
 async def send_log(guild, title, description, color=None):
-    """Send logs only to a channel explicitly configured for this guild."""
+    """Route each log event to its purpose-specific channel when configured."""
     if guild is None:
         return
     if color is None:
         color = discord.Color.blurple()
-    per_guild = config.get("log_channels", {})
-    channel_id = int(per_guild.get(str(guild.id), 0) or 0)
-    # Compatibility: honor the legacy global channel only if it belongs to this guild.
+    guild_key = str(guild.id)
+    grouped = config.get("log_channel_groups", {}).get(guild_key, {})
+    group = _log_group_for(title, description or "")
+    channel_id = int(grouped.get(group, 0) or 0)
+    # Legacy single-channel setup remains supported until the new setup is run.
+    if not channel_id:
+        channel_id = int(config.get("log_channels", {}).get(guild_key, 0) or 0)
     if not channel_id:
         legacy_id = int(config.get("log_channel_id", 0) or 0)
         legacy_channel = guild.get_channel(legacy_id) if legacy_id else None
@@ -1322,7 +1358,7 @@ class HelpView(discord.ui.View):
             "backups": ("Backups & Logs",
                         f"`{p}backup create` — Create a server backup (Premium)\n"
                         f"`{p}backup load` — Restore a server backup (Premium)\n"
-                        f"`{p}setuplogs #channel` — Set up security logs\n"
+                        f"`{p}setuplogs` — Create the Kanade logs category and separate log channels\n"
                         f"`{p}disablelogs` — Disable security logs\n"
                         f"`{p}snipe` — View the latest deleted message"),
             "utilities": ("Information",
@@ -3567,23 +3603,63 @@ async def backup_load(ctx, code: str = None):
             await target.send(embed=error_embed)
 
 
+async def setup_guild_log_channels(guild):
+    """Create/reuse Kanade logs category and purpose-specific text channels."""
+    me = guild.me
+    if me is None:
+        return None, {}, ["Kanade could not resolve its server member object."]
+    category = discord.utils.get(guild.categories, name="Kanade logs")
+    created = []
+    if category is None:
+        # Keep security logs private by default; admins bypass overwrites, and
+        # moderators with log-management permissions are explicitly granted access.
+        overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+        overwrites[me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, read_message_history=True, manage_channels=True)
+        for role in guild.roles:
+            if role != guild.default_role and (role.permissions.administrator or role.permissions.manage_guild or role.permissions.manage_messages):
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        category = await guild.create_category("Kanade logs", overwrites=overwrites, reason="Set up Kanade security log channels")
+        created.append("Kanade logs category")
+    mapping = {}
+    for key, (channel_name, display_name, topic) in LOG_CHANNEL_DEFINITIONS.items():
+        channel = discord.utils.get(category.text_channels, name=channel_name)
+        if channel is None:
+            channel = await guild.create_text_channel(
+                channel_name,
+                category=category,
+                topic=topic,
+                reason="Set up Kanade security log channels",
+            )
+            created.append(display_name)
+        mapping[key] = channel.id
+    config.setdefault("log_channel_groups", {})[str(guild.id)] = mapping
+    # Clear any legacy destination so it cannot override the purpose-specific channels.
+    config.setdefault("log_channels", {}).pop(str(guild.id), None)
+    save_config()
+    return category, mapping, created
+
 @bot.command(name="setuplogs")
-async def setuplogs_command(ctx, channel: discord.TextChannel = None):
+async def setuplogs_command(ctx):
     if not await manager_check(ctx):
         return
-    channel = channel or ctx.channel
-    config.setdefault("log_channels", {})[str(ctx.guild.id)] = channel.id
-    # Retain the old setting as a compatibility field without making it the global destination.
-    save_config()
-    await ctx.reply(embed=feature_embed("Security Logs Enabled", f"Logs will be sent to {channel.mention}."), mention_author=False)
+    try:
+        category, mapping, created = await setup_guild_log_channels(ctx.guild)
+    except discord.Forbidden:
+        return await ctx.reply(embed=feature_embed("⚒ Error", "Kanade needs **Manage Channels**, **View Channels**, **Send Messages**, and **Embed Links** permissions to set up logs."), mention_author=False)
+    except discord.HTTPException as exc:
+        return await ctx.reply(embed=feature_embed("⚒ Error", f"Could not finish creating the log channels: `{str(exc)[:700]}`"), mention_author=False)
+    channel_lines = "\n".join(f"• <#{channel_id}>" for channel_id in mapping.values())
+    status = f"Created {len(created)} item(s)." if created else "The category and channels already existed; they were reused."
+    await ctx.reply(embed=feature_embed("Kanade Logs Configured", f"Category: {category.mention}\n{status}\n\n{channel_lines}\n\nEach event will now be sent to its matching log channel."), mention_author=False)
 
 @bot.command(name="disablelogs")
 async def disablelogs_command(ctx):
     if not await manager_check(ctx):
         return
+    config.setdefault("log_channel_groups", {}).pop(str(ctx.guild.id), None)
     config.setdefault("log_channels", {}).pop(str(ctx.guild.id), None)
     save_config()
-    await ctx.reply(embed=feature_embed("Security Logs Disabled", "Security logs disabled."), mention_author=False)
+    await ctx.reply(embed=feature_embed("Security Logs Disabled", "Automatic security logs are now disabled for this server. Existing log channels were left in place."), mention_author=False)
 
 
 async def apply_manual_lock(guild, actor):
@@ -4062,17 +4138,23 @@ async def slash_backup_load(interaction: discord.Interaction, code: str = None, 
 
 bot.tree.add_command(backup_slash_group)
 
-@bot.tree.command(name="setuplogs", description="Enable security logs in a selected channel")
-@app_commands.describe(channel="Channel where security logs should be sent")
-async def slash_setuplogs(interaction: discord.Interaction, channel: discord.TextChannel):
+@bot.tree.command(name="setuplogs", description="Create Kanade's category and separate security log channels")
+async def slash_setuplogs(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message(embed=feature_embed("Server Only", "Use this command in a server.", color=discord.Color.red()), ephemeral=True)
     if not has_admin_access(interaction.user):
         return await interaction.response.send_message(embed=feature_embed("Access Denied", "Administrator permission is required.", color=discord.Color.red()), ephemeral=True)
-    config.setdefault("log_channels", {})[str(guild.id)] = channel.id
-    save_config()
-    await interaction.response.send_message(embed=feature_embed("Security Logs Enabled", f"Logs for **{guild.name}** will be sent to {channel.mention}."), ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        category, mapping, created = await setup_guild_log_channels(guild)
+        lines = "\n".join(f"• <#{channel_id}>" for channel_id in mapping.values())
+        status = f"Created {len(created)} item(s)." if created else "Existing category and channels were reused."
+        await interaction.followup.send(embed=feature_embed("Kanade Logs Configured", f"Category: {category.mention}\n{status}\n\n{lines}\n\nEach event will be routed to its matching channel."), ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send(embed=feature_embed("⚒ Error", "Kanade needs **Manage Channels**, **View Channels**, **Send Messages**, and **Embed Links** permissions."), ephemeral=True)
+    except discord.HTTPException as exc:
+        await interaction.followup.send(embed=feature_embed("⚒ Error", f"Could not finish creating the log channels: `{str(exc)[:700]}`"), ephemeral=True)
 
 @bot.tree.command(name="disablelogs", description="Disable automatic security logs for this server")
 async def slash_disablelogs(interaction: discord.Interaction):
@@ -4081,9 +4163,10 @@ async def slash_disablelogs(interaction: discord.Interaction):
         return await interaction.response.send_message(embed=feature_embed("Server Only", "Use this command in a server.", color=discord.Color.red()), ephemeral=True)
     if not has_admin_access(interaction.user):
         return await interaction.response.send_message(embed=feature_embed("Access Denied", "Administrator permission is required.", color=discord.Color.red()), ephemeral=True)
+    config.setdefault("log_channel_groups", {}).pop(str(guild.id), None)
     config.setdefault("log_channels", {}).pop(str(guild.id), None)
     save_config()
-    await interaction.response.send_message(embed=feature_embed("Security Logs Disabled", "Automatic security logs are now disabled for this server."), ephemeral=True)
+    await interaction.response.send_message(embed=feature_embed("Security Logs Disabled", "Automatic security logs are now disabled for this server. Existing log channels were left in place."), ephemeral=True)
 
 # ==================== PER-SERVER SLASH WHITELIST ====================
 @bot.tree.command(
