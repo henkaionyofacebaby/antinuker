@@ -3,3 +3,4 @@ discord.py
 psutil
 PyNaCl
 davey
+Pillow
