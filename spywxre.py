@@ -70,34 +70,32 @@ def _approved_embed_banner(user=None, guild=None):
     return banner.url if banner else None
 
 async def _render_banner_card(embed, banner_url=None, guild=None):
-    """Return the normal information embed followed by a separate banner embed."""
+    """Keep the banner inside the same embed, beneath its information content."""
     banner_url = banner_url or _approved_embed_banner(bot.user, guild=guild)
-    # The information embed always stays first; the banner is a separate image
-    # embed directly underneath it, matching the requested layout.
+    # Discord controls the embed background. Leaving color unset uses the
+    # client's native dark background without a colored accent/sidebar.
     embed.color = None
-    if not banner_url or not banner_url.startswith(("https://", "http://")):
-        return [embed]
-    banner_embed = discord.Embed()
-    banner_embed.set_image(url=banner_url)
-    return [embed, banner_embed]
+    if banner_url and banner_url.startswith(("https://", "http://")):
+        embed.set_image(url=banner_url)
+    return embed
 
 async def _send_banner_card(ctx, embed, view=None, banner_url=None, guild=None):
-    """Send a native banner embed followed by the real information embed."""
+    """Send one information embed with its banner attached at the bottom."""
     try:
-        embeds = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
-        return await ctx.reply(embeds=embeds, view=view, mention_author=False)
+        rendered_embed = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
+        return await ctx.reply(embed=rendered_embed, view=view, mention_author=False)
     except Exception:
-        logging.exception("Failed to send native banner embeds; falling back to content embed")
+        logging.exception("Failed to send banner embed; falling back to information embed")
         return await ctx.reply(embed=embed, view=view, mention_author=False)
 
 async def _edit_banner_card(interaction, embed, view, guild=None):
-    """Refresh both native embeds when a help-menu dropdown changes category."""
+    """Refresh the same embed and its banner when a help-menu category changes."""
     try:
         banner_url = _approved_embed_banner(bot.user, guild=guild)
-        embeds = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
-        return await interaction.response.edit_message(embeds=embeds, view=view)
+        rendered_embed = await _render_banner_card(embed, banner_url=banner_url, guild=guild)
+        return await interaction.response.edit_message(embed=rendered_embed, view=view)
     except Exception:
-        logging.exception("Failed to refresh native banner embeds; falling back to content embed")
+        logging.exception("Failed to refresh banner embed; falling back to information embed")
         return await interaction.response.edit_message(embed=embed, view=view)
 
 class StyledEmbed(_DiscordEmbed):
