@@ -61,10 +61,12 @@ def _arrow_lines(value):
         stripped = line.strip()
         if not stripped:
             lines.append("")
-        elif stripped.startswith("➔"):
+        elif stripped.startswith("˃"):
             lines.append(stripped)
+        elif stripped.startswith("➔"):
+            lines.append("˃" + stripped[1:])
         else:
-            lines.append(f"➔ {stripped}")
+            lines.append(f"˃ {stripped}")
     return "\n".join(lines)
 
 def _decorate_embed_label(value, prefix):
@@ -132,7 +134,16 @@ class StyledEmbed(_DiscordEmbed):
                 title = re.sub(r"^[^\w$]+\s*", "", title).strip()
                 kwargs["title"] = title or "Details"
         if isinstance(kwargs.get("description"), str):
-            kwargs["description"] = _clean_embed_text(kwargs["description"])
+            description = _clean_embed_text(kwargs["description"])
+            title_text = str(kwargs.get("title", "")).lower()
+            footer_text = str(getattr(kwargs.get("footer"), "text", "") or "").lower()
+            # Error details should stay direct; structured security-log layouts
+            # have their own formatting and must not be prefixed line-by-line.
+            is_error = "error" in title_text or "failed" in title_text or "denied" in title_text
+            is_security_log = "security logs" in footer_text
+            if description and not is_error and not is_security_log:
+                description = _arrow_lines(description)
+            kwargs["description"] = description
         super().__init__(*args, **kwargs)
         bot_obj = globals().get("bot")
         user = getattr(bot_obj, "user", None) if bot_obj else None
@@ -1274,7 +1285,7 @@ class HelpView(discord.ui.View):
     def update_embed(self, category):
         p = self.prefix
         pages = {
-            "home": ("☭ Start",
+            "home": ("Overview",
                      f"Prefix: `{p}`\nDeveloper: SPYWXRE\n\n"
                      "Choose a category to view commands. Bot staff commands are in `admhelp`."),
             "moderation": ("Moderation",
@@ -1384,7 +1395,7 @@ class AdminHelpView(discord.ui.View):
     def update_embed(self, category):
         p = self.prefix
         pages = {
-            "home": ("☭ Start",
+            "home": ("Overview",
                      "Restricted bot-staff tools for Premium access, no-prefix permissions, and bot administration.\n\n"
                      f"**Prefix:** `{p}`\n**Access:** Global bot staff only\n\n"
                      "Select a category from the dropdown below to view command usage.\n"
@@ -1604,7 +1615,7 @@ class BotInfoView(discord.ui.View):
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
         total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("☭ Start", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\n> ✦ Built for server protection, moderation, and reliable security tools.\n> Developed by **SPYWXRE**\n\nChoose a category from the menu below to explore the bot."),
+            "home": ("Overview", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\n> ✦ Built for server protection, moderation, and reliable security tools.\n> Developed by **SPYWXRE**\n\nChoose a category from the menu below to explore the bot."),
             "security": ("Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
             "moderation": ("Moderation", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
             "backups": ("Backups & Logs", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
