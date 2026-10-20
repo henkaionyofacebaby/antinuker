@@ -70,25 +70,16 @@ def _approved_embed_banner(user=None, guild=None):
     return banner.url if banner else None
 
 async def _render_banner_card(embed, banner_url=None, guild=None):
-    """Build native Discord embeds: banner image first, selectable text below.
-
-    Discord controls native embed layout. Using two embeds in the same message
-    gives a banner-first visual while keeping the content real, selectable embed
-    text instead of rasterizing it into a PNG.
-    """
+    """Return the normal information embed followed by a separate banner embed."""
     banner_url = banner_url or _approved_embed_banner(bot.user, guild=guild)
+    # The information embed always stays first; the banner is a separate image
+    # embed directly underneath it, matching the requested layout.
+    embed.color = None
     if not banner_url or not banner_url.startswith(("https://", "http://")):
-        raise ValueError(
-            "No banner URL configured. Set EMBED_BANNER_URL to a direct HTTPS image URL."
-        )
-
-    banner_embed = discord.Embed(color=_EMBED_PURPLE)
+        return [embed]
+    banner_embed = discord.Embed()
     banner_embed.set_image(url=banner_url)
-    # The second embed retains the original title, description, fields and footer.
-    content_embed = copy.deepcopy(embed)
-    if content_embed.color is None:
-        content_embed.color = _EMBED_PURPLE
-    return [banner_embed, content_embed]
+    return [embed, banner_embed]
 
 async def _send_banner_card(ctx, embed, view=None, banner_url=None, guild=None):
     """Send a native banner embed followed by the real information embed."""
@@ -112,8 +103,8 @@ async def _edit_banner_card(interaction, embed, view, guild=None):
 class StyledEmbed(_DiscordEmbed):
     """Consistent $pyX branding with readable spacing and safe defaults."""
     def __init__(self, *args, **kwargs):
-        if "color" not in kwargs and len(args) < 5:
-            kwargs["color"] = _EMBED_PURPLE
+        # Madoka-style clean embeds: omit the colored side accent entirely.
+        kwargs["color"] = None
         # Also handle positional titles, while keeping all existing embed content.
         if args and isinstance(args[0], str):
             args = (_decorate_embed_label(args[0], "✦"),) + args[1:]
@@ -223,7 +214,7 @@ DANGEROUS_PERMISSIONS = (
 )
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("$pyX")
 # ==================== CONFIG FILE ====================
