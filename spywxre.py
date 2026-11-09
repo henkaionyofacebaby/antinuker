@@ -209,6 +209,10 @@ DEFAULT_CONFIG = {
     "notify_owner": True,
     "log_channel_id": 0,
     "log_channels": {},
+    "j2c_settings": {},
+    "j2c_rooms": {},
+    "confession_settings": {},
+    "honeypot_settings": {},
     "global_staff_ids": [1524801139227361403],
     "global_no_prefix": [],
     "guild_no_prefix": {},
@@ -442,6 +446,8 @@ voice_clients_requested = set()
 # every time Discord reconnects and fires on_ready again.
 STARTUP_SNAPSHOTS_DONE = False
 SLASH_COMMANDS_SYNCED = False
+PERSISTENT_VIEWS_REGISTERED = False
+HONEYPOT_MESSAGE_HISTORY = defaultdict(deque)
 # ==================== BOT ====================
 intents = discord.Intents.default()
 intents.guilds = True
@@ -579,14 +585,21 @@ LOG_CHANNEL_DEFINITIONS = {
     "role": ("role-logs", "Role Logs", "Role creation, deletion, updates, and member role changes."),
     "moderation": ("moderation-logs", "Moderation Logs", "Kicks, bans, unbans, timeouts, and other moderation actions."),
     "automod": ("automod-logs", "AutoMod Logs", "Anti-spam, anti-link, and automated moderation actions."),
+    "honeypot": ("honeypot-logs", "Honeypot Logs", "Token scams, malware bait, suspicious attachments, and honeypot detections."),
 }
 
 def _log_group_for(title, description=""):
     text = f"{title} {description}".lower()
     if any(word in text for word in ("anti-nuke", "antinuke", "nuke", "dangerous permission", "mass delete", "raid detected", "suspicious action", "protection triggered")):
         return "anti_nuke"
+    if "honeypot" in text or "token scam" in text or "malware bait" in text:
+        return "honeypot"
     if any(word in text for word in ("anti-spam", "antispam", "anti-link", "antilink", "automod", "spam action", "blocked domain", "link filtering")):
         return "automod"
+    if any(word in text for word in ("j2c", "join-to-create", "voice room")):
+        return "voice"
+    if "confession" in text:
+        return "message"
     if any(word in text for word in ("message edited", "message deleted", "message bulk", "deleted message")):
         return "message"
     if any(word in text for word in ("voice", "joined vc", "left vc", "switched vc")):
@@ -597,7 +610,7 @@ def _log_group_for(title, description=""):
         return "role"
     if any(word in text for word in ("member joined", "member left", "member updated", "member roles", "possible join raid", "user joined", "user left")):
         return "member"
-    if any(word in text for word in ("banned", "unbanned", "kicked", "timeout", "muted", "warned", "purge", "lockdown", "moderation")):
+    if any(word in text for word in ("banned", "unbanned", "unban", "kicked", "timeout", "muted", "warned", "purge", "lockdown", "moderation")):
         return "moderation"
     return "server"
 
@@ -1052,7 +1065,7 @@ async def process_audit_entry(entry):
 # ==================== EVENTS ====================
 @bot.event
 async def on_ready():
-    global STARTUP_SNAPSHOTS_DONE, SLASH_COMMANDS_SYNCED
+    global STARTUP_SNAPSHOTS_DONE, SLASH_COMMANDS_SYNCED, PERSISTENT_VIEWS_REGISTERED
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
 
     # Snapshot once per process. Re-running this for every gateway reconnect
@@ -1073,6 +1086,15 @@ async def on_ready():
             SLASH_COMMANDS_SYNCED = True
         except Exception:
             logger.exception("Slash command sync failed; it can retry on next reconnect")
+    # Restore persistent J2C control buttons after reconnect/restart.
+    if not PERSISTENT_VIEWS_REGISTERED:
+        try:
+            bot.add_view(J2CControlView())
+            bot.add_view(ConfessionReportView())
+            bot.add_view(ConfessionSubmitView())
+            PERSISTENT_VIEWS_REGISTERED = True
+        except Exception:
+            logger.exception("Could not register persistent Kanade controls")
     await update_presence()
     if not presence_refresh_loop.is_running():
         presence_refresh_loop.start()
@@ -1218,7 +1240,14 @@ async def on_member_update(before, after):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.bot or before.channel == after.channel:
+    if member.bot:
+        return
+    # Join-to-create is handled before ordinary voice logging.
+    if after.channel is not None:
+        await handle_j2c_join(member, after.channel)
+    if before.channel is not None:
+        await handle_j2c_leave(member, before.channel)
+    if before.channel == after.channel:
         return
     if before.channel is None and after.channel is not None:
         title = "🔊 Member Joined VC"
@@ -1289,6 +1318,597 @@ async def manager_check(ctx):
         )
         return False
     return True
+# ==================== KANADE COMMUNITY FEATURES ====================
+ROLE_PAGE_SIZE = 10
+
+class RoleListView(discord.ui.View):
+    def __init__(self, ctx, pages):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.pages = pages
+        self.index = 0
+        self.message = None
+        self._sync()
+
+    def _sync(self):
+        self.previous.disabled = self.index <= 0
+        self.next.disabled = self.index >= len(self.pages) - 1
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the person who ran `roles` can use these controls.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="kanade_roles_previous")
+    async def previous(self, interaction, button):
+        self.index -= 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="kanade_roles_next")
+    async def next(self, interaction, button):
+        self.index += 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+
+@bot.command(name="roles", aliases=["rolelist", "serverroles"])
+@commands.guild_only()
+async def roles_command(ctx):
+    """Display every server role from highest to lowest in Discord hierarchy order."""
+    guild = ctx.guild
+    roles = sorted(guild.roles, key=lambda role: (role.position, role.id), reverse=True)
+    pages = []
+    total = len(roles)
+    chunks = [roles[i:i + ROLE_PAGE_SIZE] for i in range(0, total, ROLE_PAGE_SIZE)] or [[]]
+    for page_index, chunk in enumerate(chunks):
+        lines = []
+        for role in chunk:
+            if role.is_default():
+                kind = "@everyone"
+            elif role.managed:
+                kind = "Managed / integration"
+            else:
+                flags = []
+                if role.hoist: flags.append("Displayed separately")
+                if role.mentionable: flags.append("Mentionable")
+                if role.permissions.administrator: flags.append("Administrator")
+                if role.permissions.manage_roles: flags.append("Manage Roles")
+                kind = ", ".join(flags) if flags else "Standard role"
+            member_count = len(role.members)
+            role_label = "@everyone" if role.is_default() else role.mention
+            lines.append(f"**{role.position}. {discord.utils.escape_markdown(role.name)}** — {discord.utils.escape_mentions(role_label)}\n`ID: {role.id}` • {member_count} member(s) • {kind}")
+        embed = StyledEmbed(
+            title=f"{guild.name} — Roles",
+            description="\n\n".join(lines) or "No roles found.",
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text=f"{total} roles • Highest to lowest • Page {page_index + 1}/{len(chunks)}")
+        pages.append(embed)
+    view = RoleListView(ctx, pages)
+    await ctx.reply(embed=pages[0], view=view if len(pages) > 1 else None, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+def _guild_feature_settings(key, guild):
+    return config.setdefault(key, {}).setdefault(str(guild.id), {})
+
+
+def _j2c_room_data(guild):
+    rooms = config.setdefault("j2c_rooms", {}).setdefault(str(guild.id), {})
+    if not isinstance(rooms, dict):
+        rooms = {}
+        config["j2c_rooms"][str(guild.id)] = rooms
+    return rooms
+
+
+def j2c_voice_channel_for_interaction(interaction):
+    if not interaction.guild:
+        return None
+    if isinstance(interaction.channel, discord.VoiceChannel):
+        return interaction.channel
+    for voice_id, room in _j2c_room_data(interaction.guild).items():
+        if room.get("control_channel_id") == interaction.channel_id:
+            channel = interaction.guild.get_channel(int(voice_id))
+            if isinstance(channel, discord.VoiceChannel):
+                return channel
+    return None
+
+
+def _j2c_is_owner(interaction):
+    channel = j2c_voice_channel_for_interaction(interaction)
+    room = _j2c_room_data(interaction.guild).get(str(channel.id), {}) if channel else {}
+    return room.get("owner_id") == interaction.user.id
+
+
+class J2CActionModal(discord.ui.Modal):
+    def __init__(self, action):
+        super().__init__(title={"limit":"Set user limit", "kick":"Kick from voice", "ban":"Ban from this room", "unban":"Unban from this room", "permit":"Allow a user", "transfer":"Transfer ownership"}.get(action, "J2C Control"))
+        self.action = action
+        label = "User limit (0 = unlimited)" if action == "limit" else "User ID"
+        placeholder = "0–99" if action == "limit" else "Paste the Discord user ID"
+        self.target = discord.ui.TextInput(label=label, placeholder=placeholder, required=True, max_length=25)
+        self.add_item(self.target)
+
+    async def on_submit(self, interaction):
+        channel = j2c_voice_channel_for_interaction(interaction)
+        if channel is None:
+            return await interaction.response.send_message("Use the private controls channel created for your J2C room.", ephemeral=True)
+        room = _j2c_room_data(interaction.guild).get(str(channel.id), {})
+        if room.get("owner_id") != interaction.user.id:
+            return await interaction.response.send_message("Only this room's owner can use its controls.", ephemeral=True)
+        raw = str(self.target.value).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return await interaction.response.send_message("Enter a valid numeric ID or limit.", ephemeral=True)
+        if self.action == "limit":
+            if not 0 <= value <= 99:
+                return await interaction.response.send_message("The limit must be between 0 and 99.", ephemeral=True)
+            await channel.edit(user_limit=value, reason=f"J2C owner {interaction.user.id} changed the limit")
+            return await interaction.response.send_message(f"Voice limit set to **{'Unlimited' if value == 0 else value}**.", ephemeral=True)
+        if self.action == "transfer":
+            target = interaction.guild.get_member(value)
+            if target is None or target not in channel.members:
+                return await interaction.response.send_message("The new owner must be a member currently in this voice channel.", ephemeral=True)
+            previous_owner = interaction.user
+            room["owner_id"] = target.id
+            save_config()
+            await channel.set_permissions(target, view_channel=True, connect=True, speak=True, send_messages=True)
+            await channel.set_permissions(previous_owner, overwrite=None)
+            if isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.set_permissions(target, view_channel=True, send_messages=True, read_message_history=True)
+                await interaction.channel.set_permissions(previous_owner, overwrite=None)
+            return await interaction.response.send_message(f"Ownership transferred to {target.mention}.", ephemeral=True)
+        target = interaction.guild.get_member(value)
+        banned = set(int(x) for x in room.get("banned_ids", []) if str(x).isdigit())
+        if self.action == "unban":
+            if target is None:
+                return await interaction.response.send_message("That user must be in this server before Kanade can clear their channel permission override. The ban remains active.", ephemeral=True)
+            banned.discard(value)
+            room["banned_ids"] = sorted(banned)
+            await channel.set_permissions(target, overwrite=None)
+            save_config()
+            return await interaction.response.send_message(f"{target.mention} is unbanned from this room.", ephemeral=True)
+        if target is None:
+            return await interaction.response.send_message("That member is not in this server.", ephemeral=True)
+        if self.action == "kick":
+            if target not in channel.members:
+                return await interaction.response.send_message("That member is not in this voice channel.", ephemeral=True)
+            await target.move_to(None, reason=f"Removed by J2C room owner {interaction.user.id}")
+            return await interaction.response.send_message(f"Disconnected {target.mention} from the room.", ephemeral=True)
+        if self.action == "ban":
+            banned.add(target.id)
+            room["banned_ids"] = sorted(banned)
+            await channel.set_permissions(target, view_channel=True, connect=False)
+            if target in channel.members:
+                await target.move_to(None, reason=f"J2C room ban by {interaction.user.id}")
+            save_config()
+            return await interaction.response.send_message(f"{target.mention} is banned from this room.", ephemeral=True)
+        if self.action == "permit":
+            await channel.set_permissions(target, view_channel=True, connect=True, speak=True, send_messages=True)
+            return await interaction.response.send_message(f"{target.mention} can now join this room.", ephemeral=True)
+
+
+class J2CControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _check_owner(self, interaction):
+        if not interaction.guild or j2c_voice_channel_for_interaction(interaction) is None:
+            await interaction.response.send_message("These controls only work in the private controls channel for a J2C room.", ephemeral=True)
+            return False
+        if not _j2c_is_owner(interaction):
+            await interaction.response.send_message("Only the owner of this voice channel can use these controls.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Lock", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="kanade_j2c_lock")
+    async def lock(self, interaction, button):
+        if not await self._check_owner(interaction): return
+        await j2c_voice_channel_for_interaction(interaction).set_permissions(interaction.guild.default_role, connect=False, view_channel=False)
+        await interaction.response.send_message("Your voice channel is now locked.", ephemeral=True)
+
+    @discord.ui.button(label="Unlock", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="kanade_j2c_unlock")
+    async def unlock(self, interaction, button):
+        if not await self._check_owner(interaction): return
+        await j2c_voice_channel_for_interaction(interaction).set_permissions(interaction.guild.default_role, connect=True, view_channel=True)
+        await interaction.response.send_message("Your voice channel is now unlocked.", ephemeral=True)
+
+    @discord.ui.button(label="Limit", emoji="👥", style=discord.ButtonStyle.secondary, custom_id="kanade_j2c_limit")
+    async def limit(self, interaction, button):
+        if await self._check_owner(interaction): await interaction.response.send_modal(J2CActionModal("limit"))
+
+    @discord.ui.button(label="Permit", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="kanade_j2c_permit")
+    async def permit(self, interaction, button):
+        if await self._check_owner(interaction): await interaction.response.send_modal(J2CActionModal("permit"))
+
+    @discord.ui.button(label="Kick", emoji="👢", style=discord.ButtonStyle.danger, custom_id="kanade_j2c_kick")
+    async def kick(self, interaction, button):
+        if await self._check_owner(interaction): await interaction.response.send_modal(J2CActionModal("kick"))
+
+    @discord.ui.button(label="Ban", emoji="⛔", style=discord.ButtonStyle.danger, custom_id="kanade_j2c_ban")
+    async def ban(self, interaction, button):
+        if await self._check_owner(interaction): await interaction.response.send_modal(J2CActionModal("ban"))
+
+    @discord.ui.button(label="Unban", emoji="♻️", style=discord.ButtonStyle.success, custom_id="kanade_j2c_unban")
+    async def unban(self, interaction, button):
+        if await self._check_owner(interaction): await interaction.response.send_modal(J2CActionModal("unban"))
+
+    @discord.ui.button(label="Banned", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="kanade_j2c_banned")
+    async def banned(self, interaction, button):
+        if not await self._check_owner(interaction): return
+        channel = j2c_voice_channel_for_interaction(interaction)
+        room = _j2c_room_data(interaction.guild).get(str(channel.id), {})
+        ids = [str(x) for x in room.get("banned_ids", [])]
+        listing = "\n".join(f"• `{user_id}`" for user_id in ids) if ids else "No users are banned from this room."
+        await interaction.response.send_message(embed=feature_embed("Room Ban List", listing), ephemeral=True)
+
+    @discord.ui.button(label="Transfer", emoji="👑", style=discord.ButtonStyle.primary, custom_id="kanade_j2c_transfer")
+    async def transfer(self, interaction, button):
+        if await self._check_owner(interaction): await interaction.response.send_modal(J2CActionModal("transfer"))
+
+
+async def handle_j2c_join(member, joined_channel):
+    settings = config.get("j2c_settings", {}).get(str(member.guild.id), {})
+    if not settings or joined_channel.id != settings.get("lobby_channel_id"):
+        return
+    category = member.guild.get_channel(settings.get("category_id", 0)) if settings.get("category_id") else joined_channel.category
+    overwrites = {
+        member.guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+        member: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, send_messages=True),
+    }
+    if member.guild.me:
+        overwrites[member.guild.me] = discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True, move_members=True, send_messages=True, read_message_history=True)
+    room_name = f"{member.display_name[:85]}'s room"
+    room_channel = None
+    control_channel = None
+    try:
+        room_channel = await member.guild.create_voice_channel(room_name, category=category, overwrites=overwrites, reason=f"J2C room for {member} ({member.id})")
+        control_overwrites = {
+            member.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        }
+        if member.guild.me:
+            control_overwrites[member.guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, read_message_history=True, manage_channels=True)
+        safe_name = re.sub(r"[^a-z0-9-]+", "-", member.display_name.lower()).strip("-")[:40] or str(member.id)
+        control_channel = await member.guild.create_text_channel(f"{safe_name}-controls", category=category, overwrites=control_overwrites, reason=f"Private J2C controls for {member} ({member.id})")
+        rooms = _j2c_room_data(member.guild)
+        rooms[str(room_channel.id)] = {"owner_id": member.id, "banned_ids": [], "control_channel_id": control_channel.id, "created_at": int(time.time())}
+        save_config()
+        try:
+            await member.move_to(room_channel, reason="Join-to-create voice channel")
+        except discord.HTTPException:
+            await control_channel.delete(reason="J2C member could not be moved into their room")
+            await room_channel.delete(reason="J2C member could not be moved into their room")
+            rooms.pop(str(room_channel.id), None)
+            save_config()
+            return
+        embed = feature_embed("Your Private Voice Channel", f"Welcome {member.mention}! You own this room. Use the controls below to manage access, limits, and members.\n\n**Owner:** {member.mention}\n**Voice Channel:** {room_channel.mention}\n**Private Controls:** {control_channel.mention}")
+        await control_channel.send(embed=embed, view=J2CControlView())
+        await send_log(member.guild, "J2C Room Created", f"**Owner:** {member.mention} (`{member.id}`)\n**Channel:** {room_channel.mention}", discord.Color.green())
+    except (discord.Forbidden, discord.HTTPException):
+        logger.exception("J2C room creation failed in guild %s", member.guild.id)
+        for partial_channel in (control_channel, room_channel):
+            if partial_channel is not None:
+                try:
+                    await partial_channel.delete(reason="Cleaning up incomplete J2C room creation")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+
+async def handle_j2c_leave(member, left_channel):
+    rooms = _j2c_room_data(member.guild)
+    if str(left_channel.id) not in rooms or left_channel.members:
+        return
+    room_data = rooms.get(str(left_channel.id), {})
+    control_channel = member.guild.get_channel(room_data.get("control_channel_id", 0)) if room_data else None
+    try:
+        if control_channel:
+            await control_channel.delete(reason="J2C room became empty")
+        await left_channel.delete(reason="J2C room became empty")
+    except (discord.Forbidden, discord.HTTPException):
+        logger.exception("Could not delete empty J2C channel %s", left_channel.id)
+        return
+    rooms.pop(str(left_channel.id), None)
+    save_config()
+    await send_log(member.guild, "J2C Room Deleted", f"**Channel:** `{left_channel.name}`\n**Last member:** {member.mention} (`{member.id}`)", discord.Color.orange())
+
+
+@bot.group(name="j2c", invoke_without_command=True)
+@commands.guild_only()
+async def j2c_group(ctx):
+    if not await require_premium(ctx): return
+    await ctx.reply(embed=feature_embed("Join-to-Create", "`!j2c setup [category]` — Create the permanent `j2c` lobby.\n`!j2c status` — Show the current setup.\n`!j2c disable` — Disable join-to-create.\n\nJoin the lobby and Kanade will create your private voice channel automatically."), mention_author=False)
+
+@j2c_group.command(name="setup")
+async def j2c_setup(ctx, category: discord.CategoryChannel = None):
+    if not await require_premium(ctx): return
+    if not await manager_check(ctx): return
+    try:
+        category = category or await ctx.guild.create_category("Join to Create")
+        lobby = discord.utils.get(category.voice_channels, name="j2c")
+        if lobby is None:
+            lobby = await ctx.guild.create_voice_channel("j2c", category=category, reason="Kanade J2C lobby")
+        await lobby.set_permissions(ctx.guild.default_role, view_channel=True, connect=True)
+        settings = {"category_id": category.id, "lobby_channel_id": lobby.id}
+        config.setdefault("j2c_settings", {})[str(ctx.guild.id)] = settings
+        save_config()
+        await ctx.reply(embed=feature_embed("J2C Enabled", f"Permanent lobby: {lobby.mention}\nCategory: {category.name}\n\nJoin the lobby to create your own private voice channel."), mention_author=False)
+    except discord.Forbidden:
+        await ctx.reply("Kanade needs Manage Channels, Move Members, and Connect permissions to set up J2C.", mention_author=False)
+    except discord.HTTPException as exc:
+        await ctx.reply(f"J2C setup failed: `{str(exc)[:300]}`", mention_author=False)
+
+@j2c_group.command(name="status")
+async def j2c_status(ctx):
+    if not await require_premium(ctx): return
+    settings = config.get("j2c_settings", {}).get(str(ctx.guild.id), {})
+    lobby = ctx.guild.get_channel(settings.get("lobby_channel_id", 0)) if settings else None
+    await ctx.reply(embed=feature_embed("J2C Status", f"Lobby: {lobby.mention if lobby else 'Not configured'}"), mention_author=False)
+
+@j2c_group.command(name="disable")
+async def j2c_disable(ctx):
+    if not await require_premium(ctx): return
+    if not await manager_check(ctx): return
+    config.setdefault("j2c_settings", {}).pop(str(ctx.guild.id), None)
+    save_config()
+    await ctx.reply(embed=feature_embed("J2C Disabled", "Join-to-create is disabled. Existing user rooms will remain until empty."), mention_author=False)
+
+
+class ConfessionReportModal(discord.ui.Modal):
+    def __init__(self, confession_id):
+        super().__init__(title="Report confession")
+        self.confession_id = confession_id
+        self.reason = discord.ui.TextInput(label="Why are you reporting this confession?", placeholder="Explain the concern", style=discord.TextStyle.paragraph, required=True, max_length=800)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction):
+        settings = config.get("confession_settings", {}).get(str(interaction.guild_id), {})
+        staff_channel = interaction.guild.get_channel(settings.get("staff_channel_id", 0)) if interaction.guild and settings else None
+        if staff_channel is None:
+            return await interaction.response.send_message("Confession reports are not configured with a staff review channel.", ephemeral=True)
+        report_embed = feature_embed("Confession Report", f"**Confession ID:** `{self.confession_id}`\n**Reported by:** {interaction.user.mention} (`{interaction.user.id}`)\n**Reason:** {discord.utils.escape_mentions(self.reason.value)}")
+        await staff_channel.send(embed=report_embed, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message("Your report has been sent to the server's staff team.", ephemeral=True)
+
+
+class ConfessionReportView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Report", emoji="🚩", style=discord.ButtonStyle.secondary, custom_id="kanade_confession_report")
+    async def report(self, interaction, button):
+        confession_id = "Unknown"
+        if interaction.message and interaction.message.embeds:
+            for field in interaction.message.embeds[0].fields:
+                if field.name.lower() == "confession id":
+                    confession_id = field.value.strip("`")
+                    break
+        await interaction.response.send_modal(ConfessionReportModal(confession_id))
+
+
+class ConfessionSubmitModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Submit an anonymous confession")
+        self.confession_text = discord.ui.TextInput(
+            label="Your confession", placeholder="Write what you want to share...",
+            style=discord.TextStyle.paragraph, required=True, min_length=3, max_length=1800
+        )
+        self.add_item(self.confession_text)
+
+    async def on_submit(self, interaction):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Use this form inside a server.", ephemeral=True)
+        if not (is_owner_id(interaction.user.id) or interaction.user.id in config.get("premium_admin_ids", []) or is_premium_guild(guild)):
+            return await interaction.response.send_message("Confessions are available in Premium-enabled servers.", ephemeral=True)
+        settings = config.get("confession_settings", {}).get(str(guild.id), {})
+        target = guild.get_channel(settings.get("channel_id", 0)) if settings else None
+        if not settings.get("enabled") or target is None:
+            return await interaction.response.send_message("Confessions are not configured in this server.", ephemeral=True)
+        confession_id = secrets.token_hex(4).upper()
+        body = discord.utils.escape_mentions(self.confession_text.value.strip())
+        embed = feature_embed("Anonymous Confession", body)
+        embed.add_field(name="Confession ID", value=f"`{confession_id}`", inline=False)
+        embed.set_footer(text="Kanade Confessions • Be respectful")
+        try:
+            await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+            staff_channel = guild.get_channel(settings.get("staff_channel_id", 0))
+            if staff_channel:
+                await staff_channel.send(embed=feature_embed("Confession Submitted", f"**ID:** `{confession_id}`\n**Author ID:** `{interaction.user.id}`\n**Public channel:** {target.mention}"))
+            await interaction.response.send_message("Your confession was submitted anonymously.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Kanade cannot send embeds in the configured confession channel.", ephemeral=True)
+        except discord.HTTPException:
+            await interaction.response.send_message("Discord could not publish your confession. Please try again.", ephemeral=True)
+
+
+class ConfessionSubmitView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Submit Confession", emoji="📝", style=discord.ButtonStyle.primary, custom_id="kanade_confession_submit")
+    async def submit(self, interaction, button):
+        await interaction.response.send_modal(ConfessionSubmitModal())
+
+
+async def post_confession_panel(channel):
+    panel = feature_embed("Anonymous Confessions", "Have something you want to share? Submit it privately using the button below. Your name will not appear on the public confession.")
+    panel.set_footer(text="Kanade Confessions • Keep it respectful")
+    await channel.send(embed=panel, view=ConfessionSubmitView(), allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.group(name="confession", invoke_without_command=True)
+@commands.guild_only()
+async def confession_group(ctx, confession_channel: discord.TextChannel = None):
+    if not await require_premium(ctx): return
+    if confession_channel is not None:
+        if ctx.author.id != ctx.guild.owner_id:
+            return await ctx.reply(embed=feature_embed("⚒ Error", "Only the server owner can assign the public confession channel with `!confession #channel`."), mention_author=False)
+        perms = confession_channel.permissions_for(ctx.guild.me)
+        if not (perms.view_channel and perms.send_messages and perms.embed_links):
+            return await ctx.reply(embed=feature_embed("⚒ Error", "Kanade needs View Channel, Send Messages, and Embed Links in that channel."), mention_author=False)
+        settings = config.setdefault("confession_settings", {}).setdefault(str(ctx.guild.id), {})
+        settings.update({"channel_id": confession_channel.id, "enabled": True})
+        save_config()
+        try:
+            await post_confession_panel(confession_channel)
+        except (discord.Forbidden, discord.HTTPException):
+            return await ctx.reply(embed=feature_embed("Channel Saved, Panel Failed", f"{confession_channel.mention} is configured, but Kanade could not post the confession panel. Check Send Messages and Embed Links permissions.", color=discord.Color.orange()), mention_author=False)
+        return await ctx.reply(embed=feature_embed("Confession Channel Set", f"Anonymous confessions will now be posted in {confession_channel.mention}. A Submit Confession button has been posted there.", color=discord.Color.green()), mention_author=False)
+    await ctx.reply(embed=feature_embed("Confessions", "`!confession #channel` — Set the public confession channel (server owner only).\n`!confession setup #channel [#staff-channel]` — Configure the channel and optional private staff review.\n`!confession status` — Show configuration.\n`!confession off` — Disable submissions.\n`!confess <message>` or `/confess` — Submit anonymously.\n\nConfessions are posted as embeds with a unique ID and Report button. The public post does not reveal the sender."), mention_author=False)
+
+@confession_group.command(name="setup")
+async def confession_setup(ctx, confession_channel: discord.TextChannel, staff_channel: discord.TextChannel = None):
+    if not await require_premium(ctx): return
+    if ctx.author.id != ctx.guild.owner_id:
+        return await ctx.reply(embed=feature_embed("⚒ Error", "Only the server owner can configure the confession destination."), mention_author=False)
+    config.setdefault("confession_settings", {})[str(ctx.guild.id)] = {"channel_id": confession_channel.id, "staff_channel_id": staff_channel.id if staff_channel else 0, "enabled": True}
+    save_config()
+    try:
+        await post_confession_panel(confession_channel)
+    except (discord.Forbidden, discord.HTTPException):
+        return await ctx.reply(embed=feature_embed("Configuration Saved, Panel Failed", "The channel was saved, but Kanade could not post the panel. Check Send Messages and Embed Links permissions."), mention_author=False)
+    await ctx.reply(embed=feature_embed("Confessions Configured", f"Public channel: {confession_channel.mention}\nStaff review: {staff_channel.mention if staff_channel else 'Not configured'}\nA Submit Confession button has been posted in the public channel."), mention_author=False)
+
+@confession_group.command(name="status")
+async def confession_status(ctx):
+    if not await require_premium(ctx): return
+    settings = config.get("confession_settings", {}).get(str(ctx.guild.id), {})
+    channel = ctx.guild.get_channel(settings.get("channel_id", 0)) if settings else None
+    staff = ctx.guild.get_channel(settings.get("staff_channel_id", 0)) if settings else None
+    await ctx.reply(embed=feature_embed("Confession Status", f"Status: **{'Enabled' if settings.get('enabled') and channel else 'Disabled'}**\nPublic channel: {channel.mention if channel else 'Not configured'}\nStaff review: {staff.mention if staff else 'Not configured'}"), mention_author=False)
+
+@confession_group.command(name="off")
+async def confession_off(ctx):
+    if not await require_premium(ctx): return
+    if not await manager_check(ctx): return
+    settings = config.setdefault("confession_settings", {}).setdefault(str(ctx.guild.id), {})
+    settings["enabled"] = False
+    save_config()
+    await ctx.reply("Anonymous confession submissions are now disabled.", mention_author=False)
+
+@bot.command(name="confess")
+@commands.guild_only()
+async def confess_command(ctx, *, message: str):
+    if not await require_premium(ctx): return
+    settings = config.get("confession_settings", {}).get(str(ctx.guild.id), {})
+    target = ctx.guild.get_channel(settings.get("channel_id", 0)) if settings else None
+    if not settings.get("enabled") or target is None:
+        return await ctx.reply("Confessions are not configured in this server yet.", mention_author=False)
+    message = message.strip()
+    if len(message) < 3 or len(message) > 1800:
+        return await ctx.reply("Your confession must be between 3 and 1,800 characters.", mention_author=False)
+    if ctx.message:
+        try: await ctx.message.delete()
+        except (discord.Forbidden, discord.HTTPException): pass
+    confession_id = secrets.token_hex(4).upper()
+    embed = feature_embed("Anonymous Confession", discord.utils.escape_mentions(message))
+    embed.add_field(name="Confession ID", value=f"`{confession_id}`", inline=False)
+    embed.set_footer(text="Kanade Confessions • Be respectful")
+    try:
+        await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+        staff_channel = ctx.guild.get_channel(settings.get("staff_channel_id", 0))
+        if staff_channel:
+            staff_embed = feature_embed("Confession Submitted", f"**ID:** `{confession_id}`\n**Author ID:** `{ctx.author.id}`\n**Public channel:** {target.mention}")
+            await staff_channel.send(embed=staff_embed)
+        await ctx.reply("Your confession was submitted anonymously.", delete_after=6, mention_author=False)
+    except discord.Forbidden:
+        await ctx.reply("Kanade cannot send messages in the configured confession channel.", mention_author=False)
+
+
+# Honeypot is heuristic anti-scam moderation; it never executes or downloads attachments.
+HONEYPOT_TOKEN_RE = re.compile(r"(?i)\b(?:mfa\.[\w-]{20,}|[\w-]{20,}\.[\w-]{5,}\.[\w-]{20,})\b")
+HONEYPOT_SCAM_TERMS = (
+    "free nitro", "nitro gift", "claim your nitro", "steam gift", "free robux",
+    "crypto giveaway", "wallet connect", "verify your discord",
+    "discord token", "grab your token", "paste your token", "token grabber",
+    "download this executor", "security verification", "airdrop claim", "free gift card",
+)
+HONEYPOT_DANGEROUS_EXTENSIONS = (".exe", ".scr", ".bat", ".cmd", ".ps1", ".js", ".vbs", ".hta", ".msi", ".dll", ".com")
+HONEYPOT_SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "cutt.ly", "rb.gy", "shorturl.at"}
+
+def honeypot_reason(message):
+    content = (message.content or "").lower()
+    if HONEYPOT_TOKEN_RE.search(message.content or ""):
+        return "A Discord-token-shaped string was posted."
+    if ("mrbeast" in content or "mr beast" in content) and any(word in content for word in ("token", "claim", "giveaway", "crypto", "free money", "connect wallet")):
+        return "MrBeast-branded token or giveaway bait detected."
+    matched = [term for term in HONEYPOT_SCAM_TERMS if term in content]
+    if matched:
+        return "Suspicious token, giveaway, or verification bait: " + ", ".join(matched[:3])
+    domains = extract_domains(message.content or "")
+    if any(domain in HONEYPOT_SHORTENERS for domain in domains) and any(word in content for word in ("claim", "verify", "gift", "free", "token", "nitro", "wallet")):
+        return "A shortened link was combined with giveaway or account-verification bait."
+    suspicious_image_names = [a.filename for a in message.attachments if re.search(r"(?i)(mr.?beast|token|giveaway|claim|nitro|wallet)", a.filename) and (a.content_type or "").startswith("image/")]
+    if suspicious_image_names:
+        return "Suspicious giveaway/token image filename: " + ", ".join(suspicious_image_names[:3])
+    risky = [a.filename for a in message.attachments if any(a.filename.lower().endswith(ext) for ext in HONEYPOT_DANGEROUS_EXTENSIONS)]
+    if risky:
+        return "Potentially executable attachment(s): " + ", ".join(risky[:3])
+    if message.attachments and any(word in content for word in ("run this", "open this", "verify here", "claim here", "token", "giveaway")):
+        if any(a.content_type and a.content_type.startswith("image/") for a in message.attachments):
+            return "Image attachment paired with suspicious token/giveaway instructions; image contents were not executed or trusted."
+    return None
+
+@bot.command(name="honeypot")
+@commands.guild_only()
+async def honeypot_command(ctx, action: str = "status"):
+    if not await manager_check(ctx): return
+    action = action.lower()
+    settings = _guild_feature_settings("honeypot_settings", ctx.guild)
+    if action in ("on", "enable"):
+        settings["enabled"] = True
+        save_config()
+        description = "Honeypot detection is enabled. Suspicious messages will be removed and logged."
+    elif action in ("off", "disable"):
+        settings["enabled"] = False
+        save_config()
+        description = "Honeypot detection is disabled."
+    elif action == "status":
+        description = f"Status: **{'Enabled' if settings.get('enabled', False) else 'Disabled'}**\nDetection: token-shaped strings, scam/verification bait, risky executable attachments, suspicious shortened links, image-plus-bait captions, and burst/repeated-message spam.\nAction: delete and log; no automatic bans. Image pixels are not OCR-scanned, so suspicious image-only posts may need staff review."
+    else:
+        description = "Usage: `!honeypot on`, `!honeypot off`, or `!honeypot status`."
+    await ctx.reply(embed=feature_embed("Honeypot", description), mention_author=False)
+
+@bot.listen("on_message")
+async def kanade_honeypot_listener(message):
+    if message.guild is None or (message.author.bot and message.webhook_id is None):
+        return
+    settings = config.get("honeypot_settings", {}).get(str(message.guild.id), {})
+    if not settings.get("enabled", False):
+        return
+    if has_admin_access(message.author) or is_whitelisted(message.guild, message.author.id):
+        return
+    reason = honeypot_reason(message)
+    history_key = (message.guild.id, message.author.id)
+    now = time.monotonic()
+    recent = HONEYPOT_MESSAGE_HISTORY[history_key]
+    normalized = re.sub(r"\s+", " ", (message.content or "").strip().lower())
+    recent.append((now, normalized))
+    while recent and now - recent[0][0] > 12:
+        recent.popleft()
+    nonempty = [content for _, content in recent if content]
+    if reason is None and len(recent) >= 7:
+        reason = "High-volume message burst (7 or more messages within 12 seconds)."
+    if reason is None and normalized and nonempty.count(normalized) >= 3:
+        reason = "Repeated identical-message spam (3 or more copies within 12 seconds)."
+    if not reason:
+        return
+    deleted = False
+    try:
+        await message.delete()
+        deleted = True
+    except (discord.Forbidden, discord.HTTPException):
+        logger.warning("Honeypot detected message %s but could not delete it", message.id)
+    await send_log(message.guild, "HONEYPOT DETECTION", f"**Author:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n**Detection:** {discord.utils.escape_markdown(reason)}\n**Deleted:** {'Yes' if deleted else 'No — missing permissions or API failure'}\n**Message ID:** `{message.id}`", discord.Color.red())
+    try:
+        action_text = "removed" if deleted else "flagged, but could not be deleted"
+        await message.channel.send(f"{message.author.mention}, Kanade {action_text} a message that matched suspicious scam or malware-bait patterns.", delete_after=8, allowed_mentions=discord.AllowedMentions(users=True))
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
 # ==================== PREFIX COMMANDS ====================
 class HelpCategorySelect(discord.ui.Select):
     def __init__(self, ctx, prefix):
@@ -1333,6 +1953,7 @@ class HelpView(discord.ui.View):
                            f"`{p}ban @member|<user ID> [reason]` — Ban a member\n"
                            f"`{p}timeout @member|<user ID> <1min|1d|1w> [reason]` — Timeout a member\n"
                            f"`{p}unban <user ID>` — Unban a user by ID\n"
+                           f"`{p}unban all` — Unban everyone after confirmation\n"
                            f"`{p}purge <amount>` — Delete recent messages\n"
                            f"`{p}purge all` — Clear accessible channel history\n"
                            f"`{p}purge @user <amount>` — Purge one member's messages\n"
@@ -1340,6 +1961,8 @@ class HelpView(discord.ui.View):
                            f"`{p}unlock` — Restore saved channel permissions\n"
                            f"`{p}lockdown` / `{p}unlockdown` — Lock or restore server channels"),
             "roles": ("Roles",
+                      f"`{p}roles` — List every server role from highest to lowest\n"
+                      f"`{p}roledeletes` — Review and remove roles with dangerous permissions\n"
                       f"`{p}role @member|<user ID> <role name|role ID>` — Give a role\n"
                       f"`{p}unrole @member|<user ID> <role name|role ID>` — Remove a role\n"
                       "`/roleall` — Give a role to eligible members\n"
@@ -1354,6 +1977,7 @@ class HelpView(discord.ui.View):
                            f"`{p}antilink exempt @member` / `{p}antilink unexempt @member` — Manage exemptions\n"
                            f"`{p}whitelist add @member` / `{p}whitelist remove @member` — Edit whitelist\n"
                            f"`{p}whitelist list` — View whitelist\n"
+                           f"`{p}honeypot on/off/status` — Detect suspicious token scams and malware bait (logs to #honeypot-logs)\n"
                            "`/lockdown` / `/unlockdown` — Slash-command lockdown controls"),
             "backups": ("Backups & Logs",
                         f"`{p}backup create` — Create a server backup (Premium)\n"
@@ -1368,13 +1992,18 @@ class HelpView(discord.ui.View):
                           f"`{p}av [@user]` — View a user's avatar (Premium)\n"
                           f"`{p}banner [@user|user ID]` — View a user's Discord banner (Premium)\n"
                           f"`{p}ping` — Show bot gateway latency\n"
-                          f"`{p}joinvc` — Join your current voice channel"),
+                          f"`{p}joinvc` — Join your current voice channel\n"
+                          f"`{p}honeypot` — View honeypot status and commands"),
             "premium": ("Premium",
                         f"`{p}cb <image URL>` — Change the bot's banner (Premium)\n"
                         f"`{p}cp <image URL>` — Change the bot's profile picture (Premium)\n"
                         f"`{p}cn <new name>` — Change the bot's nickname in this server (Premium)\n"
                         f"`{p}cn reset` — Reset the bot's server nickname (Premium)\n"
-                        f"`{p}steal <custom emoji> [name]` — Add a custom emoji (Premium)\n\n"
+                        f"`{p}steal <custom emoji> [name]` — Add a custom emoji (Premium)\n"
+                        f"`{p}j2c setup [category]` — Set up private join-to-create voice rooms (Premium)\n"
+                        f"`{p}confession #channel` — Set the public confession channel (server owner, Premium)\n"
+                        f"`{p}confession setup #channel [#staff-channel]` — Configure anonymous confessions (Premium)\n"
+                        f"`{p}confess <message>` — Submit an anonymous confession (Premium)\n\n"
                         "You can attach an image when using the banner or profile-picture command."),
             "configuration": ("Configuration",
                              f"`{p}prefix <new_prefix>` — Change this server's prefix (Premium)\n"
@@ -2625,9 +3254,45 @@ async def ban_command(ctx, target: str, *, reason="No reason provided"):
 @bot.command(name="unban")
 @commands.guild_only()
 @commands.check(lambda ctx: has_admin_access(ctx.author))
-async def unban_command(ctx, user_id: str):
-    """Unban by numeric Discord user ID (the user need not be in the server)."""
+async def unban_command(ctx, user_id: str = None):
+    """Unban one user by ID, or all currently banned users after confirmation."""
+    if user_id is None:
+        return await ctx.reply(embed=role_embed("Missing Argument", "Usage: `!unban <user ID>` or `!unban all`."), mention_author=False)
     raw_id = user_id.strip().strip("<@!>")
+    if raw_id.lower() == "all":
+        if not ctx.guild.me.guild_permissions.ban_members:
+            return await ctx.reply(embed=role_embed("Permission Denied", "I need **Ban Members** permission to unban users.", discord.Color.red()), mention_author=False)
+        try:
+            banned_entries = [entry async for entry in ctx.guild.bans(limit=None)]
+        except discord.Forbidden:
+            return await ctx.reply(embed=role_embed("Permission Denied", "I cannot view the server ban list. Check my **Ban Members** permission.", discord.Color.red()), mention_author=False)
+        except discord.HTTPException as error:
+            return await ctx.reply(embed=role_embed("Unban Failed", f"Could not retrieve the ban list: `{str(error)[:300]}`", discord.Color.red()), mention_author=False)
+        if not banned_entries:
+            return await ctx.reply(embed=role_embed("No Bans Found", "There are no banned users in this server."), mention_author=False)
+        prompt = await ctx.reply(embed=role_embed("Confirm Unban All", f"This will unban **{len(banned_entries)} users** from this server.\nReact with ✅ within 30 seconds to confirm, or ❌ to cancel.", discord.Color.orange()), mention_author=False)
+        try:
+            for emoji in ("✅", "❌"):
+                await prompt.add_reaction(emoji)
+        except discord.HTTPException:
+            return await ctx.reply(embed=role_embed("Confirmation Unavailable", "I couldn't add confirmation reactions. Nothing was unbanned.", discord.Color.red()), mention_author=False)
+        def _unban_all_check(reaction, user):
+            return user.id == ctx.author.id and reaction.message.id == prompt.id and str(reaction.emoji) in ("✅", "❌")
+        try:
+            reaction, _ = await bot.wait_for("reaction_add", timeout=30.0, check=_unban_all_check)
+        except asyncio.TimeoutError:
+            return await prompt.edit(embed=role_embed("Unban All Cancelled", "No confirmation received. No users were unbanned.", discord.Color.orange()))
+        if str(reaction.emoji) != "✅":
+            return await prompt.edit(embed=role_embed("Unban All Cancelled", "You cancelled the operation. No users were unbanned.", discord.Color.orange()))
+        succeeded, failed = 0, 0
+        for entry in banned_entries:
+            try:
+                await ctx.guild.unban(entry.user, reason=f"Bulk unban requested by {ctx.author} ({ctx.author.id})")
+                succeeded += 1
+            except (discord.Forbidden, discord.HTTPException):
+                failed += 1
+        await send_log(ctx.guild, "Bulk Unban Completed", f"**Moderator:** {ctx.author.mention} (`{ctx.author.id}`)\n**Successfully unbanned:** {succeeded}\n**Failed:** {failed}", discord.Color.orange())
+        return await prompt.edit(embed=role_embed("Unban All Complete", f"Successfully unbanned: **{succeeded}**\nFailed: **{failed}**", discord.Color.green() if failed == 0 else discord.Color.orange()))
     if not raw_id.isdigit():
         return await ctx.reply(embed=role_embed("Invalid User ID", "Usage: `!unban <user ID>` — provide the numeric ID of a banned user."), mention_author=False)
     try:
@@ -2642,6 +3307,48 @@ async def unban_command(ctx, user_id: str):
         await ctx.reply(embed=role_embed("Permission Denied", "I need **Ban Members** permission to unban users.", discord.Color.red()), mention_author=False)
     except discord.HTTPException as error:
         await ctx.reply(embed=role_embed("Unban Failed", f"Discord could not complete the unban: {error}", discord.Color.red()), mention_author=False)
+
+# Emergency cleanup: removes only roles carrying high-risk permissions, never every role.
+@bot.command(name="roledeletes")
+@commands.guild_only()
+async def roledeletes_command(ctx):
+    if not await manager_check(ctx):
+        return
+    if not ctx.guild.me.guild_permissions.manage_roles:
+        return await ctx.reply(embed=role_embed("Permission Denied", "I need **Manage Roles** permission.", discord.Color.red()), mention_author=False)
+    dangerous_flags = ("administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks", "ban_members", "kick_members", "manage_messages", "mention_everyone")
+    bot_top = ctx.guild.me.top_role
+    candidates = [role for role in ctx.guild.roles if role != ctx.guild.default_role and not role.managed and role < bot_top and any(getattr(role.permissions, flag, False) for flag in dangerous_flags)]
+    if not candidates:
+        return await ctx.reply(embed=role_embed("No Risky Roles Found", "No deletable roles with high-risk permissions were found below Kanade's highest role."), mention_author=False)
+    preview = "\n".join(f"• {discord.utils.escape_markdown(role.name)} (`{role.id}`)" for role in sorted(candidates, key=lambda r: r.position, reverse=True)[:20])
+    if len(candidates) > 20:
+        preview += f"\n…and {len(candidates) - 20} more."
+    prompt = await ctx.reply(embed=role_embed("Confirm Risky Role Cleanup", f"This will delete **{len(candidates)} roles** that have administrator, server-management, moderation, or other high-risk permissions.\n\n{preview}\n\nThis can remove legitimate staff roles. React with ✅ within 30 seconds to confirm, or ❌ to cancel.", discord.Color.orange()), mention_author=False)
+    try:
+        for emoji in ("✅", "❌"):
+            await prompt.add_reaction(emoji)
+    except discord.HTTPException:
+        return await ctx.reply(embed=role_embed("Confirmation Unavailable", "I couldn't add confirmation reactions. No roles were deleted.", discord.Color.red()), mention_author=False)
+    def _role_cleanup_check(reaction, user):
+        return user.id == ctx.author.id and reaction.message.id == prompt.id and str(reaction.emoji) in ("✅", "❌")
+    try:
+        reaction, _ = await bot.wait_for("reaction_add", timeout=30.0, check=_role_cleanup_check)
+    except asyncio.TimeoutError:
+        return await prompt.edit(embed=role_embed("Role Cleanup Cancelled", "No confirmation received. No roles were deleted.", discord.Color.orange()))
+    if str(reaction.emoji) != "✅":
+        return await prompt.edit(embed=role_embed("Role Cleanup Cancelled", "You cancelled the operation. No roles were deleted.", discord.Color.orange()))
+    deleted, failed = 0, 0
+    deleted_names = []
+    for role in candidates:
+        try:
+            deleted_names.append(f"{role.name} ({role.id})")
+            await role.delete(reason=f"Kanade emergency risky-role cleanup requested by {ctx.author} ({ctx.author.id})")
+            deleted += 1
+        except (discord.Forbidden, discord.HTTPException):
+            failed += 1
+    await send_log(ctx.guild, "Risky Roles Bulk Deleted", f"**Moderator:** {ctx.author.mention} (`{ctx.author.id}`)\n**Deleted:** {deleted}\n**Failed:** {failed}\n**Role names:** {', '.join(deleted_names[:15]) or 'None'}", discord.Color.orange())
+    await prompt.edit(embed=role_embed("Role Cleanup Complete", f"Deleted: **{deleted}**\nFailed: **{failed}**\nOnly roles with high-risk permissions were targeted.", discord.Color.green() if failed == 0 else discord.Color.orange()))
 
 # ==================== ROLE MANAGEMENT ====================
 def role_embed(title, description, color=None):
@@ -4289,11 +4996,39 @@ async def slash_commands(interaction: discord.Interaction):
     description = (
         "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`\n\n"
         "**Moderation:** `/kick`, `/ban`, `/unban`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`, `/lockdown`, `/unlockdown`\n\n"
-        "**Utilities:** `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/help`\n\n"
+        "**Utilities:** `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/confess`, `/help`\n"
         "**Bot staff:** `/premium`, `/np`, `/npremove`, `/gnp`, `/gnpremove`, `/generatelink`, `/serverlists`\n\n"
         "Prefix commands remain available. Use `/help` if it is registered by your client, or `!help` / your server prefix plus `help` for the full guide."
     )
     await interaction.response.send_message(embed=feature_embed("Kanade | Slash Commands", description), ephemeral=True)
+
+@bot.tree.command(name="confess", description="Submit an anonymous confession (Premium)")
+@app_commands.describe(message="Your anonymous confession (up to 1,800 characters)")
+async def slash_confess(interaction: discord.Interaction, message: str):
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+    if not (is_owner_id(interaction.user.id) or interaction.user.id in config.get("premium_admin_ids", []) or is_premium_guild(guild)):
+        return await interaction.response.send_message("Confessions are available in Premium-enabled servers.", ephemeral=True)
+    settings = config.get("confession_settings", {}).get(str(guild.id), {})
+    target = guild.get_channel(settings.get("channel_id", 0)) if settings else None
+    if not settings.get("enabled") or target is None:
+        return await interaction.response.send_message("Confessions are not configured in this server yet.", ephemeral=True)
+    message = message.strip()
+    if len(message) < 3 or len(message) > 1800:
+        return await interaction.response.send_message("Your confession must be between 3 and 1,800 characters.", ephemeral=True)
+    confession_id = secrets.token_hex(4).upper()
+    embed = feature_embed("Anonymous Confession", discord.utils.escape_mentions(message))
+    embed.add_field(name="Confession ID", value=f"`{confession_id}`", inline=False)
+    embed.set_footer(text="Kanade Confessions • Be respectful")
+    try:
+        await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+        staff_channel = guild.get_channel(settings.get("staff_channel_id", 0))
+        if staff_channel:
+            await staff_channel.send(embed=feature_embed("Confession Submitted", f"**ID:** `{confession_id}`\n**Author ID:** `{interaction.user.id}`\n**Public channel:** {target.mention}"))
+        await interaction.response.send_message("Your confession was submitted anonymously.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("Kanade cannot send messages in the configured confession channel.", ephemeral=True)
 
 @bot.tree.command(name="security", description="Show this server's protection status")
 async def slash_security(interaction: discord.Interaction):
