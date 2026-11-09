@@ -1119,9 +1119,9 @@ async def update_presence():
         server_count = len(bot.guilds)
         await bot.change_presence(
             status=discord.Status.dnd,
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name=f"{server_count:,} servers"
+            activity=discord.Streaming(
+                name=f"Watching over {server_count:,} servers",
+                url="https://www.youtube.com/watch?v=Os4WFOsJE_I"
             )
         )
     except discord.HTTPException:
