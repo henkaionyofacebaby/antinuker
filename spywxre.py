@@ -2749,19 +2749,13 @@ async def bot_info_command(ctx):
 
 
 @bot.command(name="ping")
-async def ping_command(ctx):
-    """Measure Discord gateway latency and message response time."""
-    start = time.perf_counter()
-    message = await ctx.send("📶 Checking latency...")
-    response_time = round((time.perf_counter() - start) * 1000)
+async def ping(ctx):
     latency = round(bot.latency * 1000)
-
-    await message.edit(
-        content=(
-            f"📶 **Latency:** `{latency}ms`\n"
-            f"⚡ **Response:** `{response_time}ms`"
-        )
+    embed = discord.Embed(
+        description=f"📶 **Latency is {latency}ms!**",
+        color=discord.Color.dark_purple()
     )
+    await ctx.send(embed=embed)
 
 # ==================== SERVER-SPECIFIC BOT PROFILE ====================
 PROFILE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -5419,24 +5413,14 @@ async def slash_whitelist(
 # ==================== EXTENDED SLASH COMMAND COVERAGE ====================
 # Keep the prefix interface for compatibility while exposing the main remaining
 # feature controls as native Discord application commands.
-@bot.tree.command(
-    name="ping",
-    description="Check Kanade's gateway latency and response time."
-)
+@bot.tree.command(name="ping", description="Check Kanade's gateway latency.")
 async def slash_ping(interaction: discord.Interaction):
-    start = time.perf_counter()
-    await interaction.response.defer(ephemeral=True)
-
-    response_time = round((time.perf_counter() - start) * 1000)
     latency = round(bot.latency * 1000)
-
-    await interaction.followup.send(
-        (
-            f"📶 **Latency:** `{latency}ms`\n"
-            f"⚡ **Response:** `{response_time}ms`"
-        ),
-        ephemeral=True
+    embed = discord.Embed(
+        description=f"📶 **Latency is {latency}ms!**",
+        color=discord.Color.dark_purple()
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="rank", description="View a member's XP and server rank")
 @app_commands.describe(member="Member to inspect; defaults to you")
