@@ -2750,27 +2750,18 @@ async def bot_info_command(ctx):
 
 @bot.command(name="ping")
 async def ping_command(ctx):
-    """Show the bot's current Discord gateway latency in a branded embed."""
-    latency_ms = round(bot.latency * 1000)
-    connection_status = "Online" if bot.is_ready() else "Connecting"
-    latency_note = "Connection looks healthy." if latency_ms < 200 else (
-        "Connection is a little slow." if latency_ms < 400 else
-        "Connection is currently experiencing high latency."
-    )
+    """Measure Discord gateway latency and message response time."""
+    start = time.perf_counter()
+    message = await ctx.send("📶 Checking latency...")
+    response_time = round((time.perf_counter() - start) * 1000)
+    latency = round(bot.latency * 1000)
 
-    embed = StyledEmbed(
-        title="📶 Connection Status",
-        description=(
-            f"📶 Latency: `{latency_ms} ms`\n"
-            f"🟢 Status: {connection_status}\n"
-            f"ℹ️ {latency_note}"
-        ),
-        color=discord.Color.from_rgb(35, 0, 55),
-        timestamp=discord.utils.utcnow(),
+    await message.edit(
+        content=(
+            f"📶 **Latency:** `{latency}ms`\n"
+            f"⚡ **Response:** `{response_time}ms`"
+        )
     )
-    if bot.user:
-        embed.set_thumbnail(url=bot.user.display_avatar.url)
-    await ctx.reply(embed=embed, mention_author=False)
 
 # ==================== SERVER-SPECIFIC BOT PROFILE ====================
 PROFILE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -5428,13 +5419,24 @@ async def slash_whitelist(
 # ==================== EXTENDED SLASH COMMAND COVERAGE ====================
 # Keep the prefix interface for compatibility while exposing the main remaining
 # feature controls as native Discord application commands.
-@bot.tree.command(name="ping", description="Check Kanade's Discord gateway latency")
+@bot.tree.command(
+    name="ping",
+    description="Check Kanade's gateway latency and response time."
+)
 async def slash_ping(interaction: discord.Interaction):
-    latency_ms = round(bot.latency * 1000) if bot.is_ready() else -1
-    status = "Connected" if latency_ms >= 0 else "Connecting"
-    note = "Healthy gateway connection." if 0 <= latency_ms < 200 else ("Elevated gateway latency." if latency_ms < 400 else "High gateway latency; hosting/network may be under load.")
-    embed = StyledEmbed(title="📶 Kanade • Connection Status", description=f"**Gateway latency:** `{latency_ms if latency_ms >= 0 else 'N/A'} ms`\n**Status:** {status}\n{note}", color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    start = time.perf_counter()
+    await interaction.response.defer(ephemeral=True)
+
+    response_time = round((time.perf_counter() - start) * 1000)
+    latency = round(bot.latency * 1000)
+
+    await interaction.followup.send(
+        (
+            f"📶 **Latency:** `{latency}ms`\n"
+            f"⚡ **Response:** `{response_time}ms`"
+        ),
+        ephemeral=True
+    )
 
 @bot.tree.command(name="rank", description="View a member's XP and server rank")
 @app_commands.describe(member="Member to inspect; defaults to you")
