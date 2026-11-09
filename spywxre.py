@@ -22,7 +22,7 @@ import secrets
 import string
 from pathlib import Path
 import aiohttp
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from collections import defaultdict, deque
 import discord
 from discord.ext import commands, tasks
@@ -212,6 +212,10 @@ DEFAULT_CONFIG = {
     "j2c_settings": {},
     "j2c_rooms": {},
     "confession_settings": {},
+    "xp_settings": {},
+    "xp_data": {},
+    "giveaways": {},
+    "counting_settings": {},
     "honeypot_settings": {},
     "global_staff_ids": [1524801139227361403],
     "global_no_prefix": [],
@@ -321,6 +325,11 @@ def load_config():
     result["guild_whitelists"] = normalized_whitelists
     return result
 config = load_config()
+
+# Community feature runtime state. XP cooldowns are intentionally in-memory.
+XP_COOLDOWNS = {}
+GIVEAWAY_LOOP_STARTED = False
+
 
 # Bot credentials are intentionally not loaded from config.json.
 
@@ -1092,28 +1101,27 @@ async def on_ready():
             bot.add_view(J2CControlView())
             bot.add_view(ConfessionReportView())
             bot.add_view(ConfessionSubmitView())
+            for _giveaway_id, _giveaway in config.get("giveaways", {}).items():
+                if not _giveaway.get("ended"):
+                    bot.add_view(GiveawayJoinView(_giveaway_id))
             PERSISTENT_VIEWS_REGISTERED = True
         except Exception:
             logger.exception("Could not register persistent Kanade controls")
+    if not giveaway_expiry_loop.is_running():
+        giveaway_expiry_loop.start()
     await update_presence()
     if not presence_refresh_loop.is_running():
         presence_refresh_loop.start()
 
 async def update_presence():
+    """Show the live number of servers Kanade is protecting."""
     try:
-        # Sum member counts across all connected guilds. Members shared by
-        # multiple guilds are counted once per guild (combined membership).
-        total_users = sum(
-            guild.member_count if guild.member_count is not None else len(guild.members)
-            for guild in bot.guilds
-        )
-        # Discord requires a valid Twitch/YouTube URL for Streaming presence.
-        # Replace this URL with your own channel if you want the activity to link there.
+        server_count = len(bot.guilds)
         await bot.change_presence(
-            status=discord.Status.online,
-            activity=discord.Streaming(
-                name=f"Watching over {total_users:,} users",
-                url="https://www.youtube.com/watch?v=Os4WFOsJE_I"
+            status=discord.Status.dnd,
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f"{server_count:,} servers"
             )
         )
     except discord.HTTPException:
@@ -1656,6 +1664,15 @@ async def j2c_disable(ctx):
     await ctx.reply(embed=feature_embed("J2C Disabled", "Join-to-create is disabled. Existing user rooms will remain until empty."), mention_author=False)
 
 
+async def add_confession_reactions(message):
+    """Add lightweight public reactions to a published anonymous confession."""
+    for emoji in ("❤️", "😂", "😭"):
+        try:
+            await message.add_reaction(emoji)
+        except (discord.Forbidden, discord.HTTPException):
+            break
+
+
 class ConfessionReportModal(discord.ui.Modal):
     def __init__(self, confession_id):
         super().__init__(title="Report confession")
@@ -1673,9 +1690,43 @@ class ConfessionReportModal(discord.ui.Modal):
         await interaction.response.send_message("Your report has been sent to the server's staff team.", ephemeral=True)
 
 
+class ConfessionReplyModal(discord.ui.Modal):
+    def __init__(self, confession_id):
+        super().__init__(title="Reply anonymously")
+        self.confession_id = confession_id
+        self.reply_text = discord.ui.TextInput(label="Your anonymous reply", style=discord.TextStyle.paragraph, min_length=2, max_length=1200, required=True)
+        self.add_item(self.reply_text)
+
+    async def on_submit(self, interaction):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Use this inside the server.", ephemeral=True)
+        if not (is_owner_id(interaction.user.id) or interaction.user.id in config.get("premium_admin_ids", []) or is_premium_guild(guild)):
+            return await interaction.response.send_message("Anonymous replies are available in Premium-enabled servers.", ephemeral=True)
+        body = discord.utils.escape_mentions(self.reply_text.value.strip())
+        embed = feature_embed("Anonymous Reply", f"**Reply to:** `{self.confession_id}`\n\n{body}")
+        embed.set_footer(text="Kanade Confessions • Anonymous reply")
+        try:
+            published = await interaction.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await add_confession_reactions(published)
+            await interaction.response.send_message("Your anonymous reply has been posted.", ephemeral=True)
+        except (discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message("Kanade could not post your reply in this channel.", ephemeral=True)
+
+
 class ConfessionReportView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+
+    @discord.ui.button(label="Reply Anonymously", emoji="💬", style=discord.ButtonStyle.primary, custom_id="kanade_confession_reply")
+    async def reply(self, interaction, button):
+        confession_id = "Unknown"
+        if interaction.message and interaction.message.embeds:
+            for field in interaction.message.embeds[0].fields:
+                if field.name.lower() == "confession id":
+                    confession_id = field.value.strip("`")
+                    break
+        await interaction.response.send_modal(ConfessionReplyModal(confession_id))
 
     @discord.ui.button(label="Report", emoji="🚩", style=discord.ButtonStyle.secondary, custom_id="kanade_confession_report")
     async def report(self, interaction, button):
@@ -1713,7 +1764,8 @@ class ConfessionSubmitModal(discord.ui.Modal):
         embed.add_field(name="Confession ID", value=f"`{confession_id}`", inline=False)
         embed.set_footer(text="Kanade Confessions • Be respectful")
         try:
-            await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+            published = await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+            await add_confession_reactions(published)
             staff_channel = guild.get_channel(settings.get("staff_channel_id", 0))
             if staff_channel:
                 await staff_channel.send(embed=feature_embed("Confession Submitted", f"**ID:** `{confession_id}`\n**Author ID:** `{interaction.user.id}`\n**Public channel:** {target.mention}"))
@@ -1734,7 +1786,7 @@ class ConfessionSubmitView(discord.ui.View):
 
 
 async def post_confession_panel(channel):
-    panel = feature_embed("Anonymous Confessions", "Have something you want to share? Submit it privately using the button below. Your name will not appear on the public confession.")
+    panel = feature_embed("Anonymous Confessions", "Have something you want to share? Submit it privately using the button below. Your name will not appear on the public confession.\n\nReact to confessions with ❤️ 😂 😭 to show your support.")
     panel.set_footer(text="Kanade Confessions • Keep it respectful")
     await channel.send(embed=panel, view=ConfessionSubmitView(), allowed_mentions=discord.AllowedMentions.none())
 
@@ -1757,7 +1809,7 @@ async def confession_group(ctx, confession_channel: discord.TextChannel = None):
         except (discord.Forbidden, discord.HTTPException):
             return await ctx.reply(embed=feature_embed("Channel Saved, Panel Failed", f"{confession_channel.mention} is configured, but Kanade could not post the confession panel. Check Send Messages and Embed Links permissions.", color=discord.Color.orange()), mention_author=False)
         return await ctx.reply(embed=feature_embed("Confession Channel Set", f"Anonymous confessions will now be posted in {confession_channel.mention}. A Submit Confession button has been posted there.", color=discord.Color.green()), mention_author=False)
-    await ctx.reply(embed=feature_embed("Confessions", "`!confession #channel` — Set the public confession channel (server owner only).\n`!confession setup #channel [#staff-channel]` — Configure the channel and optional private staff review.\n`!confession status` — Show configuration.\n`!confession off` — Disable submissions.\n`!confess <message>` or `/confess` — Submit anonymously.\n\nConfessions are posted as embeds with a unique ID and Report button. The public post does not reveal the sender."), mention_author=False)
+    await ctx.reply(embed=feature_embed("Confessions", "`!confession #channel` — Set the public confession channel (server owner only).\n`!confession setup #channel [#staff-channel]` — Configure the channel and optional private staff review.\n`!confession status` — Show configuration.\n`!confession prompt` — Post a community prompt.\n`!confession off` — Disable submissions.\n`!confess <message>` or `/confess` — Submit anonymously.\n\nConfessions support anonymous replies, reactions, private reports, and community prompts. The public post does not reveal the sender."), mention_author=False)
 
 @confession_group.command(name="setup")
 async def confession_setup(ctx, confession_channel: discord.TextChannel, staff_channel: discord.TextChannel = None):
@@ -1771,6 +1823,26 @@ async def confession_setup(ctx, confession_channel: discord.TextChannel, staff_c
     except (discord.Forbidden, discord.HTTPException):
         return await ctx.reply(embed=feature_embed("Configuration Saved, Panel Failed", "The channel was saved, but Kanade could not post the panel. Check Send Messages and Embed Links permissions."), mention_author=False)
     await ctx.reply(embed=feature_embed("Confessions Configured", f"Public channel: {confession_channel.mention}\nStaff review: {staff_channel.mention if staff_channel else 'Not configured'}\nA Submit Confession button has been posted in the public channel."), mention_author=False)
+
+@confession_group.command(name="prompt")
+async def confession_prompt(ctx):
+    if not await require_premium(ctx): return
+    if not await manager_check(ctx): return
+    settings = config.get("confession_settings", {}).get(str(ctx.guild.id), {})
+    target = ctx.guild.get_channel(settings.get("channel_id", 0)) if settings else None
+    if not settings.get("enabled") or target is None:
+        return await ctx.reply("Confessions are not configured in this server yet.", mention_author=False)
+    prompts = [
+        "What's something you've wanted to say but never had the courage to?",
+        "What's one small thing that made your week better?",
+        "What's a lesson you learned the hard way?",
+        "If you could clear up one misunderstanding, what would it be?",
+        "What's an unpopular opinion you have?",
+        "What's one thing you wish people understood about you?",
+    ]
+    await target.send(embed=feature_embed("Confession Prompt", secrets.choice(prompts)), allowed_mentions=discord.AllowedMentions.none())
+    await ctx.reply(f"Posted a new anonymous confession prompt in {target.mention}.", mention_author=False)
+
 
 @confession_group.command(name="status")
 async def confession_status(ctx):
@@ -1808,7 +1880,8 @@ async def confess_command(ctx, *, message: str):
     embed.add_field(name="Confession ID", value=f"`{confession_id}`", inline=False)
     embed.set_footer(text="Kanade Confessions • Be respectful")
     try:
-        await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+        published = await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+        await add_confession_reactions(published)
         staff_channel = ctx.guild.get_channel(settings.get("staff_channel_id", 0))
         if staff_channel:
             staff_embed = feature_embed("Confession Submitted", f"**ID:** `{confession_id}`\n**Author ID:** `{ctx.author.id}`\n**Public channel:** {target.mention}")
@@ -1816,6 +1889,311 @@ async def confess_command(ctx, *, message: str):
         await ctx.reply("Your confession was submitted anonymously.", delete_after=6, mention_author=False)
     except discord.Forbidden:
         await ctx.reply("Kanade cannot send messages in the configured confession channel.", mention_author=False)
+
+
+# ==================== COMMUNITY FEATURES ====================
+
+def _guild_feature_map(config_key, guild_id):
+    mapping = config.setdefault(config_key, {})
+    if not isinstance(mapping, dict):
+        mapping = {}
+        config[config_key] = mapping
+    return mapping.setdefault(str(guild_id), {})
+
+
+def _parse_duration(value):
+    match = re.fullmatch(r"(\d+)([smhd])", value.strip().lower())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+    seconds = amount * multiplier
+    return seconds if 30 <= seconds <= 30 * 86400 else None
+
+
+def _xp_level(total_xp):
+    # Smooth progression: level N requires 100*N*(N+1)/2 total XP.
+    level = 0
+    while total_xp >= 100 * (level + 1) * (level + 2) // 2:
+        level += 1
+    current_floor = 100 * level * (level + 1) // 2
+    next_floor = 100 * (level + 1) * (level + 2) // 2
+    return level, total_xp - current_floor, next_floor - current_floor
+
+
+async def _award_message_xp(message):
+    if message.guild is None or message.author.bot or not message.content.strip():
+        return
+    guild_id, user_id = str(message.guild.id), str(message.author.id)
+    settings = config.get("xp_settings", {}).get(guild_id, {})
+    if settings.get("enabled", True) is False:
+        return
+    cooldown = max(5, min(300, int(settings.get("cooldown", 60))))
+    now = time.monotonic()
+    key = (guild_id, user_id)
+    if now - XP_COOLDOWNS.get(key, 0) < cooldown:
+        return
+    XP_COOLDOWNS[key] = now
+    data = config.setdefault("xp_data", {}).setdefault(guild_id, {})
+    record = data.setdefault(user_id, {"xp": 0, "messages": 0})
+    old_level = _xp_level(int(record.get("xp", 0)))[0]
+    gained = secrets.randbelow(11) + 15
+    record["xp"] = int(record.get("xp", 0)) + gained
+    record["messages"] = int(record.get("messages", 0)) + 1
+    new_level = _xp_level(record["xp"])[0]
+    save_config()
+    if new_level > old_level and settings.get("announce", True):
+        try:
+            await message.channel.send(
+                f"🎉 {message.author.mention} reached **Level {new_level}**! Keep chatting.",
+                allowed_mentions=discord.AllowedMentions(users=True)
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
+@bot.listen("on_message")
+async def kanade_xp_listener(message):
+    try:
+        await _award_message_xp(message)
+    except Exception:
+        logger.exception("XP listener failed")
+
+
+@bot.command(name="rank", aliases=["level"])
+@commands.guild_only()
+async def rank_command(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    guild_data = config.get("xp_data", {}).get(str(ctx.guild.id), {})
+    record = guild_data.get(str(member.id), {"xp": 0, "messages": 0})
+    total = int(record.get("xp", 0))
+    level, progress, needed = _xp_level(total)
+    ranked = sorted(guild_data.items(), key=lambda item: int(item[1].get("xp", 0)), reverse=True)
+    position = next((i for i, (uid, _) in enumerate(ranked, 1) if uid == str(member.id)), None)
+    embed = feature_embed(f"{member.display_name} • Rank", f"**Level:** {level}\n**XP:** {total:,}\n**Progress:** {progress:,} / {needed:,}\n**Messages counted:** {int(record.get('messages', 0)):,}\n**Server rank:** #{position or '—'}")
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+@bot.command(name="leaderboard", aliases=["lb"])
+@commands.guild_only()
+async def leaderboard_command(ctx):
+    guild_data = config.get("xp_data", {}).get(str(ctx.guild.id), {})
+    ranked = sorted(guild_data.items(), key=lambda item: int(item[1].get("xp", 0)), reverse=True)[:10]
+    if not ranked:
+        return await ctx.reply("No XP rankings yet. Start chatting to earn XP!", mention_author=False)
+    lines = []
+    for index, (user_id, record) in enumerate(ranked, 1):
+        member = ctx.guild.get_member(int(user_id))
+        name = member.display_name if member else f"Unknown user ({user_id})"
+        level = _xp_level(int(record.get("xp", 0)))[0]
+        lines.append(f"**{index}.** {discord.utils.escape_markdown(name)} — Level **{level}** · {int(record.get('xp', 0)):,} XP")
+    await ctx.reply(embed=feature_embed("Server XP Leaderboard", "\n".join(lines)), mention_author=False)
+
+
+@bot.command(name="xp")
+@commands.guild_only()
+async def xp_settings_command(ctx, action: str = "status", value: str = None):
+    if not await manager_check(ctx):
+        return
+    settings = _guild_feature_map("xp_settings", ctx.guild.id)
+    action = action.lower()
+    if action in ("on", "enable"):
+        settings["enabled"] = True
+        description = "XP and leveling are enabled. Members earn 15–25 XP per eligible message, subject to cooldown."
+    elif action in ("off", "disable"):
+        settings["enabled"] = False
+        description = "XP earning is disabled. Existing XP and ranks are preserved."
+    elif action == "announce":
+        settings["announce"] = value not in ("off", "false", "0")
+        description = f"Level-up announcements are **{'enabled' if settings['announce'] else 'disabled'}**."
+    elif action == "status":
+        description = f"XP earning: **{'Disabled' if settings.get('enabled') is False else 'Enabled'}**\nLevel-up announcements: **{'Disabled' if settings.get('announce') is False else 'Enabled'}**\nMessage cooldown: **{int(settings.get('cooldown', 60))} seconds**\nCommands: `!rank`, `!leaderboard`, `!xp on/off`, `!xp announce on/off`."
+    else:
+        description = "Usage: `!xp status`, `!xp on`, `!xp off`, or `!xp announce on/off`."
+    save_config()
+    await ctx.reply(embed=feature_embed("XP Settings", description), mention_author=False)
+
+
+class GiveawayJoinView(discord.ui.View):
+    def __init__(self, giveaway_id):
+        super().__init__(timeout=None)
+        self.giveaway_id = str(giveaway_id)
+        button = discord.ui.Button(
+            label="Enter Giveaway", emoji="🎉", style=discord.ButtonStyle.success,
+            custom_id=f"kanade_giveaway_join:{self.giveaway_id}"
+        )
+        button.callback = self.enter
+        self.add_item(button)
+
+    async def enter(self, interaction: discord.Interaction):
+        giveaway = config.get("giveaways", {}).get(self.giveaway_id)
+        if not giveaway or giveaway.get("ended") or float(giveaway.get("ends_at", 0)) <= time.time():
+            return await interaction.response.send_message("This giveaway has ended.", ephemeral=True)
+        if interaction.guild_id != int(giveaway.get("guild_id", 0)):
+            return await interaction.response.send_message("This giveaway belongs to another server.", ephemeral=True)
+        entrants = giveaway.setdefault("entrants", [])
+        user_id = str(interaction.user.id)
+        if user_id in entrants:
+            entrants.remove(user_id)
+            message = "Your giveaway entry has been removed."
+        else:
+            entrants.append(user_id)
+            message = "You are entered! Good luck."
+        save_config()
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+async def _finish_giveaway(giveaway_id, reroll=False):
+    giveaway = config.get("giveaways", {}).get(str(giveaway_id))
+    if not giveaway:
+        return None, "Giveaway not found."
+    guild = bot.get_guild(int(giveaway.get("guild_id", 0)))
+    if guild is None:
+        return None, "The giveaway server is not available."
+    channel = guild.get_channel(int(giveaway.get("channel_id", 0)))
+    if channel is None:
+        return None, "The giveaway channel is not available."
+    try:
+        message = await channel.fetch_message(int(giveaway.get("message_id", 0)))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None, "Could not find the original giveaway message."
+    entrants = [uid for uid in giveaway.get("entrants", [])]
+    if reroll:
+        previous = giveaway.get("winner_ids", [])
+        entrants = [uid for uid in entrants if uid not in previous]
+    valid = []
+    for uid in entrants:
+        member = guild.get_member(int(uid))
+        if member and not member.bot:
+            valid.append(member)
+    winners_count = max(1, min(20, int(giveaway.get("winners", 1))))
+    winners = secrets.SystemRandom().sample(valid, min(winners_count, len(valid))) if valid else []
+    if not reroll:
+        giveaway["ended"] = True
+    giveaway["winner_ids"] = [str(member.id) for member in winners]
+    save_config()
+    embed = feature_embed("Giveaway Ended" if not reroll else "Giveaway Rerolled", f"**Prize:** {discord.utils.escape_markdown(giveaway.get('prize', 'Prize'))}\n**Entries:** {len(giveaway.get('entrants', []))}\n**Winner(s):** {', '.join(member.mention for member in winners) if winners else 'No eligible entries'}")
+    if not reroll:
+        await message.edit(embed=embed, view=None)
+    else:
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
+    return winners, None
+
+
+@tasks.loop(seconds=15)
+async def giveaway_expiry_loop():
+    now = time.time()
+    for giveaway_id, giveaway in list(config.get("giveaways", {}).items()):
+        if not giveaway.get("ended") and float(giveaway.get("ends_at", 0)) <= now:
+            try:
+                await _finish_giveaway(giveaway_id)
+            except Exception:
+                logger.exception("Could not finish giveaway %s", giveaway_id)
+
+
+@giveaway_expiry_loop.before_loop
+async def before_giveaway_expiry_loop():
+    await bot.wait_until_ready()
+
+
+@bot.command(name="giveaway")
+@commands.guild_only()
+async def giveaway_command(ctx, action: str = "help", *, arguments: str = ""):
+    action = action.lower()
+    if action == "start":
+        if not await manager_check(ctx):
+            return
+        parts = arguments.split(maxsplit=2)
+        if len(parts) < 3:
+            return await ctx.reply("Usage: `!giveaway start <duration> <winner-count> <prize>` — duration examples: `10m`, `2h`, `1d`.", mention_author=False)
+        duration = _parse_duration(parts[0])
+        if duration is None or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 20:
+            return await ctx.reply("Use a duration from 30 seconds to 30 days and a winner count from 1 to 20.", mention_author=False)
+        prize = parts[2].strip()
+        if not prize or len(prize) > 200:
+            return await ctx.reply("The prize must be between 1 and 200 characters.", mention_author=False)
+        giveaway_id = secrets.token_hex(5).upper()
+        ends_at = time.time() + duration
+        embed = feature_embed("🎉 Giveaway", f"**Giveaway ID:** `{giveaway_id}`\n**Prize:** {discord.utils.escape_markdown(prize)}\n**Hosted by:** {ctx.author.mention}\n**Winners:** {int(parts[1])}\n**Entries:** 0\n**Ends:** <t:{int(ends_at)}:R>\n\nPress the button below to enter. You can leave by pressing it again.")
+        message = await ctx.send(embed=embed, view=GiveawayJoinView(giveaway_id))
+        config.setdefault("giveaways", {})[giveaway_id] = {"guild_id": ctx.guild.id, "channel_id": ctx.channel.id, "message_id": message.id, "prize": prize, "winners": int(parts[1]), "ends_at": ends_at, "entrants": [], "winner_ids": [], "ended": False}
+        save_config()
+        await ctx.reply(f"Giveaway created. ID: `{giveaway_id}`", mention_author=False)
+        return
+    if action in ("end", "reroll"):
+        if not await manager_check(ctx):
+            return
+        giveaway_id = arguments.strip()
+        if not giveaway_id:
+            return await ctx.reply(f"Usage: `!giveaway {action} <giveaway-id>`.", mention_author=False)
+        winners, error = await _finish_giveaway(giveaway_id, reroll=(action == "reroll"))
+        return await ctx.reply(error or f"Giveaway {action} complete.", mention_author=False)
+    await ctx.reply(embed=feature_embed("Giveaways", "`!giveaway start 1h 1 Nitro` — Start a giveaway\n`!giveaway end <id>` — End it early\n`!giveaway reroll <id>` — Pick a new winner\nMembers enter using the button. Only server managers can manage giveaways."), mention_author=False)
+
+
+@bot.command(name="counting")
+@commands.guild_only()
+async def counting_command(ctx, action: str = "status", channel: discord.TextChannel = None):
+    if not await manager_check(ctx):
+        return
+    settings = _guild_feature_map("counting_settings", ctx.guild.id)
+    action = action.lower()
+    if action in ("setup", "set"):
+        target = channel or (ctx.message.channel if ctx.message else None)
+        settings.update({"channel_id": target.id, "current": 0, "last_user_id": 0, "enabled": True})
+        save_config()
+        return await ctx.reply(f"Counting game set up in {target.mention}. Start at **1**; each member must take turns.", mention_author=False)
+    if action in ("off", "disable"):
+        settings["enabled"] = False
+        save_config()
+        return await ctx.reply("Counting game disabled. Your count has been saved.", mention_author=False)
+    if action == "reset":
+        settings.update({"current": 0, "last_user_id": 0, "enabled": True})
+        save_config()
+        target = ctx.guild.get_channel(int(settings.get("channel_id", 0)))
+        return await ctx.reply(f"Counting has been reset to **0** in {target.mention if target else 'the configured channel'}.", mention_author=False)
+    target = ctx.guild.get_channel(int(settings.get("channel_id", 0))) if settings else None
+    await ctx.reply(embed=feature_embed("Counting Game", f"Status: **{'Enabled' if settings.get('enabled') and target else 'Disabled'}**\nChannel: {target.mention if target else 'Not configured'}\nCurrent count: **{int(settings.get('current', 0))}**\nCommands: `!counting setup [#channel]`, `!counting reset`, `!counting off`."), mention_author=False)
+
+
+@bot.listen("on_message")
+async def kanade_counting_listener(message):
+    if message.guild is None or message.author.bot:
+        return
+    settings = config.get("counting_settings", {}).get(str(message.guild.id), {})
+    if not settings.get("enabled") or int(settings.get("channel_id", 0)) != message.channel.id:
+        return
+    content = (message.content or "").strip()
+    if not re.fullmatch(r"\d+", content):
+        return
+    expected = int(settings.get("current", 0)) + 1
+    last_user = int(settings.get("last_user_id", 0))
+    if int(content) == expected and message.author.id != last_user:
+        settings["current"] = expected
+        settings["last_user_id"] = message.author.id
+        save_config()
+        if expected % 100 == 0:
+            try:
+                await message.add_reaction("🏆")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        return
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    if int(content) == expected and message.author.id == last_user:
+        reason = "You cannot count twice in a row."
+    else:
+        reason = f"The next number was **{expected}**. The count has reset to **0**."
+        settings["current"] = 0
+        settings["last_user_id"] = 0
+        save_config()
+    try:
+        await message.channel.send(f"{message.author.mention}, {reason}", delete_after=8, allowed_mentions=discord.AllowedMentions(users=True))
+    except (discord.Forbidden, discord.HTTPException):
+        pass
 
 
 # Honeypot is heuristic anti-scam moderation; it never executes or downloads attachments.
@@ -1993,7 +2371,11 @@ class HelpView(discord.ui.View):
                           f"`{p}banner [@user|user ID]` — View a user's Discord banner (Premium)\n"
                           f"`{p}ping` — Show bot gateway latency\n"
                           f"`{p}joinvc` — Join your current voice channel\n"
-                          f"`{p}honeypot` — View honeypot status and commands"),
+                          f"`{p}honeypot` — View honeypot status and commands\n"
+                          f"`{p}rank [@member]` — View XP and level progress\n"
+                          f"`{p}leaderboard` — View the server XP leaderboard\n"
+                          f"`{p}giveaway start 1h 1 Prize` — Start a giveaway\n"
+                          f"`{p}counting setup [#channel]` — Set up the counting game"),
             "premium": ("Premium",
                         f"`{p}cb <image URL>` — Change the bot's banner (Premium)\n"
                         f"`{p}cp <image URL>` — Change the bot's profile picture (Premium)\n"
@@ -2003,7 +2385,8 @@ class HelpView(discord.ui.View):
                         f"`{p}j2c setup [category]` — Set up private join-to-create voice rooms (Premium)\n"
                         f"`{p}confession #channel` — Set the public confession channel (server owner, Premium)\n"
                         f"`{p}confession setup #channel [#staff-channel]` — Configure anonymous confessions (Premium)\n"
-                        f"`{p}confess <message>` — Submit an anonymous confession (Premium)\n\n"
+                        f"`{p}confess <message>` — Submit an anonymous confession (Premium)\n"
+                        f"`{p}confession prompt` — Post a community prompt (Premium)\n\n"
                         "You can attach an image when using the banner or profile-picture command."),
             "configuration": ("Configuration",
                              f"`{p}prefix <new_prefix>` — Change this server's prefix (Premium)\n"
@@ -5022,7 +5405,8 @@ async def slash_confess(interaction: discord.Interaction, message: str):
     embed.add_field(name="Confession ID", value=f"`{confession_id}`", inline=False)
     embed.set_footer(text="Kanade Confessions • Be respectful")
     try:
-        await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+        published = await target.send(embed=embed, view=ConfessionReportView(), allowed_mentions=discord.AllowedMentions.none())
+        await add_confession_reactions(published)
         staff_channel = guild.get_channel(settings.get("staff_channel_id", 0))
         if staff_channel:
             await staff_channel.send(embed=feature_embed("Confession Submitted", f"**ID:** `{confession_id}`\n**Author ID:** `{interaction.user.id}`\n**Public channel:** {target.mention}"))
