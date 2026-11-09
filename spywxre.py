@@ -400,11 +400,60 @@ def bot_staff_or_server_admin(user):
 
 
 
-def save_config():
+# Config changes can happen during message listeners (XP/counting). Writing and
+# pretty-printing the entire JSON file synchronously on every message can block
+# discord.py's event loop and inflate gateway heartbeat latency. Coalesce rapid
+# updates and perform serialization + disk I/O in a worker thread.
+_CONFIG_SAVE_TASK = None
+_CONFIG_SAVE_DIRTY = False
+_CONFIG_SAVE_DEBOUNCE_SECONDS = 0.4
+
+
+def _write_config_snapshot(snapshot):
     temporary = CONFIG_FILE + ".tmp"
     with open(temporary, "w", encoding="utf-8") as file:
-        json.dump(config, file, indent=4)
+        json.dump(snapshot, file, indent=4)
     os.replace(temporary, CONFIG_FILE)
+
+
+async def _flush_config_saves():
+    global _CONFIG_SAVE_TASK, _CONFIG_SAVE_DIRTY
+    try:
+        while True:
+            await asyncio.sleep(_CONFIG_SAVE_DEBOUNCE_SECONDS)
+            _CONFIG_SAVE_DIRTY = False
+            # Take a consistent event-loop-side snapshot; heavy JSON encoding
+            # and file writes happen off the gateway event loop.
+            snapshot = copy.deepcopy(config)
+            await asyncio.to_thread(_write_config_snapshot, snapshot)
+            if not _CONFIG_SAVE_DIRTY:
+                break
+    except Exception:
+        logger.exception("Deferred config save failed")
+    finally:
+        _CONFIG_SAVE_TASK = None
+        # A change may have arrived as the worker was finishing.
+        if _CONFIG_SAVE_DIRTY:
+            try:
+                loop = asyncio.get_running_loop()
+                _CONFIG_SAVE_TASK = loop.create_task(_flush_config_saves())
+            except RuntimeError:
+                pass
+
+
+def save_config():
+    """Persist config without blocking the Discord gateway during runtime."""
+    global _CONFIG_SAVE_TASK, _CONFIG_SAVE_DIRTY
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Startup / pre-event-loop compatibility.
+        _write_config_snapshot(copy.deepcopy(config))
+        return
+
+    _CONFIG_SAVE_DIRTY = True
+    if _CONFIG_SAVE_TASK is None or _CONFIG_SAVE_TASK.done():
+        _CONFIG_SAVE_TASK = loop.create_task(_flush_config_saves())
 
 
 # ==================== LEGACY ANTI-SPAM / ANTI-LINK SETTINGS ====================
@@ -1085,6 +1134,9 @@ async def on_ready():
                 await snapshot_guild(guild)
             except Exception:
                 logger.exception("Could not snapshot guild %s", guild.id)
+            # Yield between guilds so a large bot can keep heartbeats and
+            # incoming gateway events responsive during startup.
+            await asyncio.sleep(0)
         STARTUP_SNAPSHOTS_DONE = True
 
     # Global command sync is an API operation; don't repeat it on reconnect.
@@ -5373,13 +5425,160 @@ async def slash_whitelist(
         "User removed from whitelist.",
         ephemeral=True
     )
+# ==================== EXTENDED SLASH COMMAND COVERAGE ====================
+# Keep the prefix interface for compatibility while exposing the main remaining
+# feature controls as native Discord application commands.
+@bot.tree.command(name="ping", description="Check Kanade's Discord gateway latency")
+async def slash_ping(interaction: discord.Interaction):
+    latency_ms = round(bot.latency * 1000) if bot.is_ready() else -1
+    status = "Connected" if latency_ms >= 0 else "Connecting"
+    note = "Healthy gateway connection." if 0 <= latency_ms < 200 else ("Elevated gateway latency." if latency_ms < 400 else "High gateway latency; hosting/network may be under load.")
+    embed = StyledEmbed(title="📶 Kanade • Connection Status", description=f"**Gateway latency:** `{latency_ms if latency_ms >= 0 else 'N/A'} ms`\n**Status:** {status}\n{note}", color=discord.Color.from_rgb(35, 0, 55), timestamp=discord.utils.utcnow())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="rank", description="View a member's XP and server rank")
+@app_commands.describe(member="Member to inspect; defaults to you")
+async def slash_rank(interaction: discord.Interaction, member: discord.Member = None):
+    if interaction.guild is None:
+        return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+    member = member or interaction.user
+    data = config.get("xp_data", {}).get(str(interaction.guild.id), {})
+    record = data.get(str(member.id), {"xp": 0, "messages": 0})
+    total = int(record.get("xp", 0)); level, progress, needed = _xp_level(total)
+    ranked = sorted(data.items(), key=lambda item: int(item[1].get("xp", 0)), reverse=True)
+    position = next((i for i, (uid, _) in enumerate(ranked, 1) if uid == str(member.id)), None)
+    embed = feature_embed(f"{member.display_name} • Rank", f"**Level:** {level}\n**XP:** {total:,}\n**Progress:** {progress:,} / {needed:,}\n**Messages counted:** {int(record.get('messages', 0)):,}\n**Server rank:** #{position or '—'}")
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="leaderboard", description="Show the server's top XP members")
+async def slash_leaderboard(interaction: discord.Interaction):
+    if interaction.guild is None:
+        return await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+    data = config.get("xp_data", {}).get(str(interaction.guild.id), {})
+    ranked = sorted(data.items(), key=lambda item: int(item[1].get("xp", 0)), reverse=True)[:10]
+    lines=[]
+    for i,(uid,record) in enumerate(ranked,1):
+        member=interaction.guild.get_member(int(uid)); name=member.display_name if member else f"Unknown user ({uid})"
+        level=_xp_level(int(record.get("xp",0)))[0]
+        lines.append(f"**{i}.** {discord.utils.escape_markdown(name)} — Level **{level}** · {int(record.get('xp',0)):,} XP")
+    await interaction.response.send_message(embed=feature_embed("Server XP Leaderboard", "\n".join(lines) if lines else "No XP rankings yet. Start chatting to earn XP!"))
+
+@bot.tree.command(name="xp", description="Enable, disable, or inspect this server's XP system")
+@app_commands.describe(action="Choose status, on, off, or announce", value="For announce, choose on or off")
+@app_commands.choices(action=[app_commands.Choice(name=x, value=x) for x in ("status","on","off","announce")], value=[app_commands.Choice(name="on",value="on"),app_commands.Choice(name="off",value="off")])
+async def slash_xp(interaction: discord.Interaction, action: app_commands.Choice[str], value: app_commands.Choice[str] = None):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    settings=_guild_feature_map("xp_settings",guild.id)
+    if action.value=="on": settings["enabled"]=True; description="XP and leveling enabled."
+    elif action.value=="off": settings["enabled"]=False; description="XP earning disabled; existing ranks are preserved."
+    elif action.value=="announce":
+        if value is None: return await interaction.response.send_message("Choose announce on or off.",ephemeral=True)
+        settings["announce"]=value.value=="on"; description=f"Level-up announcements {'enabled' if settings['announce'] else 'disabled'}."
+    else: description=f"XP: **{'Disabled' if settings.get('enabled') is False else 'Enabled'}**\nAnnouncements: **{'Disabled' if settings.get('announce') is False else 'Enabled'}**\nCooldown: **{int(settings.get('cooldown',60))}s**"
+    save_config(); await interaction.response.send_message(embed=feature_embed("XP Settings",description),ephemeral=True)
+
+@bot.tree.command(name="counting", description="Configure the server counting game")
+@app_commands.describe(action="status, setup, reset, or off", channel="Channel for the counting game")
+@app_commands.choices(action=[app_commands.Choice(name=x,value=x) for x in ("status","setup","reset","off")])
+async def slash_counting(interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel = None):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    settings=_guild_feature_map("counting_settings",guild.id)
+    if action.value=="setup":
+        target=channel or interaction.channel; settings.update({"channel_id":target.id,"current":0,"last_user_id":0,"enabled":True}); save_config()
+        return await interaction.response.send_message(f"Counting game set up in {target.mention}. Start at **1**; members must take turns.",ephemeral=True)
+    if action.value=="off": settings["enabled"]=False; save_config(); return await interaction.response.send_message("Counting disabled; progress saved.",ephemeral=True)
+    if action.value=="reset": settings.update({"current":0,"last_user_id":0,"enabled":True}); save_config()
+    target=guild.get_channel(int(settings.get("channel_id",0)))
+    await interaction.response.send_message(embed=feature_embed("Counting Game",f"Status: **{'Enabled' if settings.get('enabled') and target else 'Disabled'}**\nChannel: {target.mention if target else 'Not configured'}\nCurrent count: **{int(settings.get('current',0))}**"),ephemeral=True)
+
+@bot.tree.command(name="honeypot", description="Enable, disable, or inspect honeypot scam detection")
+@app_commands.describe(action="Choose status, on, or off")
+@app_commands.choices(action=[app_commands.Choice(name=x,value=x) for x in ("status","on","off")])
+async def slash_honeypot(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    settings=_guild_feature_settings("honeypot_settings",guild)
+    if action.value=="on": settings["enabled"]=True; save_config()
+    elif action.value=="off": settings["enabled"]=False; save_config()
+    description=f"Honeypot is **{'Enabled' if settings.get('enabled',False) else 'Disabled'}**. Detects token-shaped strings, scam/verification bait, risky executable attachments, and suspicious shortened links. Suspicious content is deleted and logged; no automatic bans."
+    await interaction.response.send_message(embed=feature_embed("Honeypot",description),ephemeral=True)
+
+@bot.tree.command(name="antispam", description="Configure per-server anti-spam protection")
+@app_commands.describe(action="Choose status, on, or off")
+@app_commands.choices(action=[app_commands.Choice(name=x,value=x) for x in ("status","on","off")])
+async def slash_antispam(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    if action.value in ("on","off"): set_guild_setting(guild,"antispam_enabled",action.value=="on")
+    enabled=bool(get_guild_setting(guild,"antispam_enabled",False))
+    embed=feature_embed("Anti-Spam",f"Anti-spam is **{'ON' if enabled else 'OFF'}** for **{guild.name}**.\nMessages/window: {get_guild_setting(guild,'antispam_message_limit',3)} / {get_guild_setting(guild,'antispam_window_seconds',4)}s\nDuplicate limit: {get_guild_setting(guild,'antispam_duplicate_limit',3)}\nMention limit: {get_guild_setting(guild,'antispam_mention_limit',6)}\nTimeout: {get_guild_setting(guild,'antispam_timeout_seconds',300)}s")
+    await interaction.response.send_message(embed=embed,ephemeral=True)
+
+@bot.tree.command(name="antilink", description="Enable, disable, or inspect anti-link protection")
+@app_commands.describe(action="Choose status, on, or off")
+@app_commands.choices(action=[app_commands.Choice(name=x,value=x) for x in ("status","on","off")])
+async def slash_antilink(interaction: discord.Interaction, action: app_commands.Choice[str]):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    if action.value in ("on","off"): set_guild_setting(guild,"antilink_enabled",action.value=="on")
+    settings=guild_security_settings(guild)
+    enabled=bool(settings.get("antilink_enabled",False)); domains=settings.get("antilink_whitelist",[])
+    await interaction.response.send_message(embed=feature_embed("Anti-Link",f"Anti-link is **{'ON' if enabled else 'OFF'}**.\nAllowed domains: {', '.join('`'+d+'`' for d in domains[:15]) or 'None'}"),ephemeral=True)
+
+@bot.tree.command(name="timeout", description="Timeout a member for 1 minute, 1 day, or 1 week")
+@app_commands.describe(member="Member to timeout", duration="Timeout duration", reason="Reason for the timeout")
+@app_commands.choices(duration=[app_commands.Choice(name="1 minute",value="1min"),app_commands.Choice(name="1 day",value="1d"),app_commands.Choice(name="1 week",value="1w")])
+async def slash_timeout(interaction: discord.Interaction, member: discord.Member, duration: app_commands.Choice[str], reason: str = "No reason provided"):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    if member.id==guild.owner_id or (not is_bot_admin_id(interaction.user.id) and member.top_role>=interaction.user.top_role): return await interaction.response.send_message("You cannot timeout the server owner or a member with an equal/higher role.",ephemeral=True)
+    delta={"1min":timedelta(minutes=1),"1d":timedelta(days=1),"1w":timedelta(weeks=1)}[duration.value]
+    try:
+        await member.timeout(delta,reason=f"{interaction.user} ({interaction.user.id}): {reason}")
+        await interaction.response.send_message(embed=role_embed("Member Timed Out",f"**User:** {member.mention}\n**Duration:** {duration.name}\n**Reason:** {discord.utils.escape_markdown(reason)}",discord.Color.from_rgb(128,0,255)))
+        await send_log(guild,"Member timed out",f"{member} (`{member.id}`) timed out by {interaction.user} (`{interaction.user.id}`).\nDuration: {duration.name}\nReason: {reason}",discord.Color.orange())
+    except discord.Forbidden: await interaction.response.send_message("I need Moderate Members permission and a role above the target.",ephemeral=True)
+    except discord.HTTPException: await interaction.response.send_message("Discord could not apply the timeout. Please try again.",ephemeral=True)
+
+@bot.tree.command(name="untimeout", description="Remove a member's active timeout")
+@app_commands.describe(member="Member whose timeout should be removed", reason="Reason for removing the timeout")
+async def slash_untimeout(interaction: discord.Interaction, member: discord.Member, reason: str = "Timeout removed by moderator"):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    if not has_admin_access(interaction.user): return await interaction.response.send_message("Administrator access required.",ephemeral=True)
+    if member.id==guild.owner_id or (not is_bot_admin_id(interaction.user.id) and member.top_role>=interaction.user.top_role): return await interaction.response.send_message("You cannot modify the server owner or a member with an equal/higher role.",ephemeral=True)
+    if member.timed_out_until is None: return await interaction.response.send_message("That member does not currently have an active timeout.",ephemeral=True)
+    try:
+        await member.timeout(None,reason=f"{interaction.user} ({interaction.user.id}): {reason}")
+        await interaction.response.send_message(embed=role_embed("Timeout Removed",f"**User:** {member.mention}\n**Reason:** {discord.utils.escape_markdown(reason)}",discord.Color.green()))
+        await send_log(guild,"Member timeout removed",f"Timeout removed from {member} (`{member.id}`) by {interaction.user} (`{interaction.user.id}`).\nReason: {reason}",discord.Color.green())
+    except discord.Forbidden: await interaction.response.send_message("I need Moderate Members permission and a role above the target.",ephemeral=True)
+    except discord.HTTPException: await interaction.response.send_message("Discord could not remove the timeout. Please try again.",ephemeral=True)
+
+@bot.tree.command(name="roles", description="List this server's roles")
+async def slash_roles(interaction: discord.Interaction):
+    guild=interaction.guild
+    if guild is None: return await interaction.response.send_message("Use this command in a server.",ephemeral=True)
+    roles=sorted(guild.roles,key=lambda r:(r.position,r.id),reverse=True)
+    lines=[f"**{r.position}. {discord.utils.escape_markdown(r.name)}** — `{r.id}` · {len(r.members)} member(s)" for r in roles[:35]]
+    await interaction.response.send_message(embed=feature_embed(f"{guild.name} • Roles","\n".join(lines) or "No roles found."),ephemeral=True)
+
 # ==================== ADDITIONAL SLASH COMMAND COVERAGE ====================
 @bot.tree.command(name="commands", description="List the available Kanade slash commands")
 async def slash_commands(interaction: discord.Interaction):
     description = (
-        "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`\n\n"
-        "**Moderation:** `/kick`, `/ban`, `/unban`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`, `/lockdown`, `/unlockdown`\n\n"
-        "**Utilities:** `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/confess`, `/help`\n"
+        "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`, `/antispam`, `/antilink`, `/honeypot`\n\n"
+        "**Moderation:** `/kick`, `/ban`, `/unban`, `/timeout`, `/untimeout`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`, `/lockdown`, `/unlockdown`\n\n"
+        "**Utilities:** `/ping`, `/rank`, `/leaderboard`, `/xp`, `/counting`, `/roles`, `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/confess`, `/help`\n"
         "**Bot staff:** `/premium`, `/np`, `/npremove`, `/gnp`, `/gnpremove`, `/generatelink`, `/serverlists`\n\n"
         "Prefix commands remain available. Use `/help` if it is registered by your client, or `!help` / your server prefix plus `help` for the full guide."
     )
