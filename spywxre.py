@@ -30,7 +30,7 @@ from discord import app_commands
 
 # ==================== EMBED STYLE ====================
 _DiscordEmbed = discord.Embed
-_EMBED_PURPLE = discord.Color.from_rgb(35, 0, 55)
+_EMBED_PURPLE = discord.Color.from_rgb(88, 101, 242)  # Kanade purple-blue / blurple
 
 def _clean_embed_text(value):
     """Normalize whitespace without changing the meaning of command output."""
@@ -95,9 +95,8 @@ def _approved_embed_banner(user=None, guild=None):
 async def _render_banner_card(embed, banner_url=None, guild=None):
     """Keep the banner inside the same embed, beneath its information content."""
     banner_url = banner_url or _approved_embed_banner(bot.user, guild=guild)
-    # Discord controls the embed background. Leaving color unset uses the
-    # client's native dark background without a colored accent/sidebar.
-    embed.color = None
+    # Keep the same purple-blue accent on banner/info embeds as every other command.
+    embed.color = _EMBED_PURPLE
     if banner_url and banner_url.startswith(("https://", "http://")):
         embed.set_image(url=banner_url)
     return embed
@@ -124,8 +123,8 @@ async def _edit_banner_card(interaction, embed, view, guild=None):
 class StyledEmbed(_DiscordEmbed):
     """Consistent Kanade branding with readable spacing and safe defaults."""
     def __init__(self, *args, **kwargs):
-        # Madoka-style clean embeds: omit the colored side accent entirely.
-        kwargs["color"] = None
+        # Apply Kanade's purple-blue accent consistently to every command/log embed.
+        kwargs["color"] = _EMBED_PURPLE
         # Keep command embeds minimal: no automatic title decoration.
         title = kwargs.get("title")
         if isinstance(title, str):
@@ -2751,7 +2750,7 @@ async def bot_info_command(ctx):
 @bot.command(name="ping")
 async def ping(ctx):
     latency = round(bot.latency * 1000)
-    embed = discord.Embed(
+    embed = StyledEmbed(
         description=f"📶 **Latency is {latency}ms!**",
         color=discord.Color.dark_purple()
     )
@@ -4434,7 +4433,7 @@ async def whitelist_list(ctx):
     embed.set_footer(text="Kanade")
     await ctx.reply(embed=embed, mention_author=False)
 # ==================== ADDED SERVER TOOLS ====================
-PURPLE = discord.Color.from_rgb(128, 0, 255)
+PURPLE = _EMBED_PURPLE
 BACKUP_DIR = "backups"
 
 
@@ -5416,7 +5415,7 @@ async def slash_whitelist(
 @bot.tree.command(name="ping", description="Check Kanade's gateway latency.")
 async def slash_ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
-    embed = discord.Embed(
+    embed = StyledEmbed(
         description=f"📶 **Latency is {latency}ms!**",
         color=discord.Color.dark_purple()
     )
