@@ -32,11 +32,11 @@ from discord import app_commands
 # ==================== EMBED STYLE ====================
 _DiscordEmbed = discord.Embed
 _EMBED_PURPLE = discord.Color.from_rgb(88, 101, 242)  # Kanade purple-blue / blurple
-ERROR_EMOJI = "<:kanade_error:1548024407560159284>"
+ERROR_EMOJI = "<:kanade_error:1569789238507999232>"
 LOG_EMOJI = "<a:kanade_log:1547245007814004876>"
-SUCCESS_EMOJI = "<a:kanade_success:1451608282308415571>"
-LATENCY_EMOJI = "<a:kanade_latency:1569491908290679037>"
-GLOBAL_SERVERS_EMOJI = "<a:kanade_global:1497067473542053999>"
+SUCCESS_EMOJI = "<a:kanade_success:1569789596122882190>"
+LATENCY_EMOJI = "<a:kanade_ping:1569789734522191934>"
+GLOBAL_SERVERS_EMOJI = "<a:kanade_globe:1569789454225244180>"
 USERS_EMOJI = "<a:kanade_users:1527652434745495656>"
 
 def _clean_embed_text(value):
