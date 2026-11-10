@@ -13,6 +13,7 @@ for _site_packages in _LOCAL_SITE_PACKAGES:
         sys.path.insert(0, _site_packages)
 
 import json
+import html
 import time
 BOT_STARTED_AT = time.monotonic()
 import asyncio
@@ -31,12 +32,22 @@ from discord import app_commands
 # ==================== EMBED STYLE ====================
 _DiscordEmbed = discord.Embed
 _EMBED_PURPLE = discord.Color.from_rgb(88, 101, 242)  # Kanade purple-blue / blurple
+ERROR_EMOJI = "<:kanade_error:1548024407560159284>"
+LOG_EMOJI = "<a:kanade_log:1547245007814004876>"
+SUCCESS_EMOJI = "<a:kanade_success:1451608282308415571>"
 
 def _clean_embed_text(value):
-    """Normalize whitespace without changing the meaning of command output."""
+    """Remove legacy visual decoration while preserving readable content."""
     if not isinstance(value, str):
         return value
-    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = html.unescape(value).replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = []
+    for line in value.split("\n"):
+        line = re.sub(r"^\s*[╭├╰╞╮╯│┃┆┊]+\s*[・·|]?\s*", "", line)
+        line = re.sub(r"^\s*(?:➤|➜|➔|▸|›|»|✦|✧|[•·▪▫◆◇◈※]+)\s*", "", line)
+        line = re.sub(r"^\s*(?:🛡️?|⚒️?|🔒|⚙️?|✨|💾|📶|👤|🧰|🎉|📊|📝|🔨|✅|❌|⚠️?|🆔|📁|🔗|🌐|⏱|👥|📌|🖼️?)\s*", "", line)
+        cleaned.append(line.rstrip())
+    value = "\n".join(cleaned)
     value = re.sub(r"[ \t]+\n", "\n", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
     return value.strip()
@@ -121,46 +132,63 @@ async def _edit_banner_card(interaction, embed, view, guild=None):
         return await interaction.response.edit_message(embed=embed, view=view)
 
 class StyledEmbed(_DiscordEmbed):
-    """Consistent Kanade branding with readable spacing and safe defaults."""
+    """Plain, consistent embeds: action title, readable content, no branding."""
     def __init__(self, *args, **kwargs):
-        # Apply Kanade's purple-blue accent consistently to every command/log embed.
         kwargs["color"] = _EMBED_PURPLE
-        # Keep command embeds minimal: no automatic title decoration.
         title = kwargs.get("title")
         if isinstance(title, str):
-            # Command embeds identify the action, not the bot, in the title.
             title = re.sub(r"(?i)^\s*(?:🛡️?\s*)?Kanade\s*[|—:-]\s*", "", title).strip()
+            title = _clean_embed_text(title)
             if title:
+                error_title = re.match(
+                    r"(?i)^(?:error|cannot\b|.*\b(?:failed|failure|denied|forbidden|invalid|missing|not found|unavailable)\b)",
+                    title,
+                )
+                if error_title and not title.startswith((ERROR_EMOJI, LOG_EMOJI, SUCCESS_EMOJI)):
+                    title = f"{ERROR_EMOJI} {title}"
+                else:
+                    success_title = re.match(
+                        r"(?i)^(?:(?:member|user|message|channel|role|server|backup|invite|giveaway|confession|ticket|reminder|settings?|configuration|command|operation|purge|lockdown|whitelist|timeout|warning|ban|kick|unban|mute|unmute|afk|automod|anti[- ]?link|anti[- ]?spam|level|xp|voice|emoji|webhook|thread|event|poll|counting|backup code)\b.*\b(?:banned|kicked|unbanned|muted|unmuted|timed out|warned|created|deleted|updated|edited|added|removed|assigned|unassigned|restored|loaded|saved|enabled|disabled|locked|unlocked|purged|cleared|sent|started|ended|configured|completed|generated|published|joined|left|granted|revoked|reset|transferred|claimed|given|changed)\b|.*\b(?:success|successful|completed|created successfully|updated successfully|saved successfully|restored successfully)\b)",
+                        title,
+                    )
+                    if success_title and not title.startswith((ERROR_EMOJI, LOG_EMOJI, SUCCESS_EMOJI)):
+                        title = f"{SUCCESS_EMOJI} {title}"
                 kwargs["title"] = title
+            else:
+                kwargs.pop("title", None)
         if isinstance(kwargs.get("description"), str):
-            description = _clean_embed_text(kwargs["description"])
-            title_text = str(kwargs.get("title", "")).lower()
-            footer_text = str(getattr(kwargs.get("footer"), "text", "") or "").lower()
-            # Error details should stay direct; structured security-log layouts
-            # have their own formatting and must not be prefixed line-by-line.
-            is_error = "error" in title_text or "failed" in title_text or "denied" in title_text
-            is_security_log = "security logs" in footer_text
-            if is_error and isinstance(kwargs.get("title"), str):
-                kwargs["title"] = re.sub(r"^(?:˃|➔|➜|→|▸|›|➤)\s*", "", kwargs["title"]).strip()
-                if "error" in kwargs["title"].lower() and not kwargs["title"].startswith("⚒"):
-                    kwargs["title"] = "⚒ " + kwargs["title"]
-            # Do not decorate every response line. Command-list views call
-            # _arrow_lines explicitly; ordinary command replies stay minimal.
-            kwargs["description"] = description
+            kwargs["description"] = _clean_embed_text(kwargs["description"])
+        # Legacy command embeds often supplied bot branding as an author/footer.
+        author = kwargs.get("author")
+        if isinstance(author, dict) and str(author.get("name", "")).strip().casefold() in {"kanade", "kanade bot"}:
+            kwargs.pop("author", None)
+        footer = kwargs.get("footer")
+        if isinstance(footer, dict):
+            footer_text = str(footer.get("text", "")).strip()
+            if footer_text.casefold() in {"kanade", "kanade bot"} or footer_text.casefold().startswith("kanade •"):
+                kwargs.pop("footer", None)
         super().__init__(*args, **kwargs)
-        bot_obj = globals().get("bot")
-        user = getattr(bot_obj, "user", None) if bot_obj else None
-        # Ordinary command embeds stay minimal: no repeated bot-name/developer footer.
-        # Help and information views add their own branding explicitly where needed.
 
     def add_field(self, *, name, value, inline=True):
-        name = _clean_embed_text(name)
-        value = _clean_embed_text(value)
-        if not name:
-            name = "Details"
-        if not value:
-            value = "—"
+        name = _clean_embed_text(name) or "Details"
+        value = _clean_embed_text(value) or "—"
         return super().add_field(name=name, value=value, inline=inline)
+
+    def set_footer(self, *, text=None, icon_url=None):
+        text = _clean_embed_text(text) if text else None
+        if text:
+            text = re.sub(r"(?i)^kanade(?:\s+bot)?\s*[|•—:-]\s*", "", text).strip()
+        if not text:
+            return self.remove_footer()
+        # Do not display the bot avatar as decorative footer artwork.
+        return super().set_footer(text=text, icon_url=None)
+
+    def set_author(self, *, name, url=None, icon_url=None):
+        name = _clean_embed_text(name) if name else None
+        if not name or name.strip().casefold() in {"kanade", "kanade bot"}:
+            self.remove_author()
+            return self
+        return super().set_author(name=name, url=url, icon_url=None)
 
 # ==================== CONFIGURATION ====================
 # Railway authentication: read the token ONLY from the environment.
@@ -710,8 +738,11 @@ async def send_log(guild, title, description, color=None):
                 line = "▸ " + line
             detail_lines.append(line)
         formatted_description = "\n".join(detail_lines)[:4000] or "▸ No additional details were provided."
+    clean_log_title = _clean_embed_text(title or "Security Log")
+    if not clean_log_title.startswith(LOG_EMOJI):
+        clean_log_title = f"{LOG_EMOJI} {clean_log_title}"
     embed = StyledEmbed(
-        title=title,
+        title=clean_log_title,
         description=formatted_description,
         color=color,
         timestamp=discord.utils.utcnow()
@@ -3116,7 +3147,7 @@ async def purge_command(ctx, target: str = None, amount: int = None):
 
     async def purge_embed(title, description, *, color=purple, delete_after=10):
         embed = StyledEmbed(
-            title=f"Kanade | {title}",
+            title=title,
             description=description,
             color=color,
             timestamp=discord.utils.utcnow()
@@ -3774,7 +3805,6 @@ def role_embed(title, description, color=None):
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.set_footer(text="Kanade")
     return embed
 
 def find_role_by_name(guild, role_name):
