@@ -35,6 +35,9 @@ _EMBED_PURPLE = discord.Color.from_rgb(88, 101, 242)  # Kanade purple-blue / blu
 ERROR_EMOJI = "<:kanade_error:1548024407560159284>"
 LOG_EMOJI = "<a:kanade_log:1547245007814004876>"
 SUCCESS_EMOJI = "<a:kanade_success:1451608282308415571>"
+LATENCY_EMOJI = "<a:kanade_latency:1569491908290679037>"
+GLOBAL_SERVERS_EMOJI = "<a:kanade_global:1497067473542053999>"
+USERS_EMOJI = "<a:kanade_users:1527652434745495656>"
 
 def _clean_embed_text(value):
     """Remove legacy visual decoration while preserving readable content."""
@@ -2746,11 +2749,11 @@ class BotInfoView(discord.ui.View):
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
         total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("Overview", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n👥 **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **Wxre Development**\n\nSelect a category below to explore features."),
+            "home": ("Overview", f"{LATENCY_EMOJI} **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n{USERS_EMOJI} **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **Wxre Development**\n\nSelect a category below to explore features."),
             "security": ("Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
             "moderation": ("Moderation", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
             "backups": ("Backups & Logs", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
-            "stats": ("Statistics", f"📶 **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n• **Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n👥 **Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n🌐 **Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
+            "stats": ("Statistics", f"{LATENCY_EMOJI} **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n• **Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n{USERS_EMOJI} **Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n🌐 **Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
         }
         title, description = labels.get(category, labels["home"])
         description = _arrow_lines(description)
@@ -2777,7 +2780,7 @@ async def bot_info_command(ctx):
 async def ping(ctx):
     latency = round(bot.latency * 1000)
     embed = StyledEmbed(
-        description=f"📶 **Latency is {latency}ms!**",
+        description=f"{LATENCY_EMOJI} **Latency is {latency}ms!**",
         color=discord.Color.dark_purple()
     )
     await ctx.send(embed=embed)
@@ -5523,7 +5526,7 @@ async def slash_whitelist(
 async def slash_ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     embed = StyledEmbed(
-        description=f"📶 **Latency is {latency}ms!**",
+        description=f"{LATENCY_EMOJI} **Latency is {latency}ms!**",
         color=discord.Color.dark_purple()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -6560,7 +6563,7 @@ async def on_command_error(ctx, error):
         missing = getattr(error, "param", None)
         missing_name = getattr(missing, "name", "argument")
         embed = StyledEmbed(
-            title="⚒ Error",
+            title=f"{ERROR_EMOJI} Error",
             description=f"Missing argument: `{missing_name}`. Use `{ctx.prefix}help {command_name}` for usage.",
         )
         return await ctx.reply(embed=embed, mention_author=False)
