@@ -128,15 +128,10 @@ class StyledEmbed(_DiscordEmbed):
         # Keep command embeds minimal: no automatic title decoration.
         title = kwargs.get("title")
         if isinstance(title, str):
-            # Retain the bot-name header only on the main help/info pages.
-            normalized_title = title.lower()
-            keep_brand = any(token in normalized_title for token in (
-                "help", "about", "information", " bot info", "server info", "sinfo"
-            ))
-            if not keep_brand and "$pyx security" in normalized_title:
-                title = re.sub(r"(?i)\Kanade\s*\|?\s*", "", title).strip(" |—-")
-                title = re.sub(r"^[^\w$]+\s*", "", title).strip()
-                kwargs["title"] = title or "Details"
+            # Command embeds identify the action, not the bot, in the title.
+            title = re.sub(r"(?i)^\s*(?:🛡️?\s*)?Kanade\s*[|—:-]\s*", "", title).strip()
+            if title:
+                kwargs["title"] = title
         if isinstance(kwargs.get("description"), str):
             description = _clean_embed_text(kwargs["description"])
             title_text = str(kwargs.get("title", "")).lower()
@@ -4438,8 +4433,7 @@ BACKUP_DIR = "backups"
 
 
 def feature_embed(title, description, *, color=PURPLE):
-    embed = StyledEmbed(title=f"🛡️ Kanade | {title}", description=description, color=color, timestamp=discord.utils.utcnow())
-    embed.set_footer(text="Kanade")
+    embed = StyledEmbed(title=title, description=description, color=PURPLE, timestamp=discord.utils.utcnow())
     return embed
 
 
@@ -4542,6 +4536,7 @@ async def create_backup(guild):
 
 
 async def restore_backup(guild, code=None, *, replace_channels=True):
+    """Destructively restore a backup: replace removable roles and channels."""
     if code:
         path = backup_code_path(code)
         if not os.path.exists(path):
@@ -4550,65 +4545,112 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
         path = backup_path(guild.id)
         if not os.path.exists(path):
             raise FileNotFoundError("No backup found. Use `!backup create` or load a backup code.")
+
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     if not isinstance(data, dict) or not isinstance(data.get("channels"), list) or not isinstance(data.get("roles"), list):
         raise ValueError("The backup file is invalid or incomplete.")
-    if not guild.me.guild_permissions.manage_channels:
-        raise discord.Forbidden(response=None, message="The bot needs Manage Channels permission to replace channels.")
-    if data.get("roles") and not guild.me.guild_permissions.manage_roles:
-        raise discord.Forbidden(response=None, message="The bot needs Manage Roles permission to restore roles.")
 
-    # Match the source @everyone role to the destination server's @everyone role.
-    role_map = {role.id: role for role in guild.roles}
-    role_map[int(data.get("everyone_role_id", guild.default_role.id))] = guild.default_role
-    role_map[guild.default_role.id] = guild.default_role
-    for item in sorted(data.get("roles", []), key=lambda x: x.get("position", 0)):
-        existing = guild.get_role(int(item.get("id", 0)))
-        if existing is None:
-            existing = discord.utils.get(guild.roles, name=item["name"])
-        if existing is None:
-            try:
-                existing = await guild.create_role(
-                    name=item["name"], permissions=discord.Permissions(int(item.get("permissions", 0))),
-                    colour=discord.Colour(int(item.get("color", 0))), hoist=bool(item.get("hoist", False)),
-                    mentionable=bool(item.get("mentionable", False)), reason="Kanade Premium backup restore"
-                )
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                continue
-        role_map[int(item.get("id", 0))] = existing
+    me = guild.me
+    if me is None:
+        raise RuntimeError("I could not verify my server permissions. Try again after the bot is ready.")
+    if replace_channels and not me.guild_permissions.manage_channels:
+        raise discord.Forbidden(response=None, message="The bot needs Manage Channels permission to replace channels.")
+
+    # Managed roles (integration/bot roles) and @everyone cannot be deleted by bots.
+    # Validate hierarchy before making any destructive changes.
+    removable_roles = [r for r in guild.roles if r != guild.default_role and not r.managed]
+    if data.get("roles") or removable_roles:
+        if not me.guild_permissions.manage_roles:
+            raise discord.Forbidden(response=None, message="The bot needs Manage Roles permission to replace roles.")
+        blocked = [r.name for r in removable_roles if r >= me.top_role]
+        if blocked:
+            raise RuntimeError(
+                "I cannot replace these roles because they are at or above my highest role: "
+                + ", ".join(f"`{name}`" for name in blocked[:8])
+                + ". Move Kanade's highest role above them and retry."
+            )
 
     channel_items = data.get("channels", [])
+
+    # Delete all ordinary channels first. Discord's built-in `#moderators` channel
+    # is deliberately preserved, as requested; other managed/protected channels
+    # are skipped only when Discord exposes them as managed.
     if replace_channels:
-        # Delete ordinary channels first, then categories, so no category retains children.
-        # This intentionally replaces the destination's channel layout with the backup.
         current_channels = list(guild.channels)
-        current_channels.sort(key=lambda channel: isinstance(channel, discord.CategoryChannel))
+        current_channels.sort(key=lambda c: isinstance(c, discord.CategoryChannel))
         for channel in current_channels:
+            if channel.name.casefold() == "moderators" or getattr(channel, "managed", False):
+                continue
             try:
-                await channel.delete(reason="Kanade backup restore: replacing channels with selected backup")
+                await channel.delete(reason="Kanade backup restore: replacing server channels")
             except (discord.Forbidden, discord.HTTPException) as exc:
                 raise RuntimeError(
-                    f"Could not delete existing channel/category `{channel.name}`. "
-                    "No further channels were deleted; check the bot's Manage Channels permission and role position."
+                    f"Could not delete `{channel.name}`. Check Manage Channels permission and channel restrictions."
                 ) from exc
         channel_map = {}
     else:
         channel_map = {channel.id: channel for channel in guild.channels}
 
-    # Restore categories before their children. Existing channels are replaced by default.
-    ordered = sorted(channel_items, key=lambda x: (0 if x.get("type") == "category" else 1, x.get("position", 0)))
+    # Replace roles, retaining only @everyone and Discord-managed roles.
+    role_map = {
+        int(data.get("everyone_role_id", guild.default_role.id)): guild.default_role,
+        guild.default_role.id: guild.default_role,
+    }
+    for role in sorted(removable_roles, key=lambda r: r.position, reverse=True):
+        try:
+            await role.delete(reason="Kanade backup restore: replacing server roles")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            raise RuntimeError(f"Could not delete role `{role.name}`. Check role hierarchy and Manage Roles.") from exc
+
+    # Recreate every saved role. Keep the old-ID -> new-role map for channel overwrites.
+    created_roles = []
+    saved_roles = sorted(data.get("roles", []), key=lambda x: int(x.get("position", 0)))
+    for item in saved_roles:
+        try:
+            role = await guild.create_role(
+                name=str(item.get("name", "Restored Role"))[:100],
+                permissions=discord.Permissions(int(item.get("permissions", 0))),
+                colour=discord.Colour(int(item.get("color", 0))),
+                hoist=bool(item.get("hoist", False)),
+                mentionable=bool(item.get("mentionable", False)),
+                reason="Kanade backup restore: recreating saved roles",
+            )
+        except (discord.Forbidden, discord.HTTPException, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Could not recreate role `{item.get('name', 'unknown')}`: {exc}") from exc
+        old_id = int(item.get("id", 0))
+        if old_id:
+            role_map[old_id] = role
+        created_roles.append((role, int(item.get("position", 1))))
+
+    # Discord assigns new roles at the bottom initially. Explicitly restore the saved
+    # hierarchy after all roles exist, clamped below Kanade's top role.
+    if created_roles:
+        positions = {}
+        max_position = max(1, me.top_role.position - 1)
+        for role, saved_position in created_roles:
+            positions[role] = max(1, min(saved_position, max_position))
+        try:
+            await guild.edit_role_positions(positions=positions, reason="Kanade backup restore: restoring role hierarchy")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            raise RuntimeError("Roles were recreated, but their saved hierarchy could not be applied. Check Kanade's role position.") from exc
+
+    # Create categories first, then their children. Use newly-created role mappings
+    # so channel permission overwrites point at the restored roles, not stale IDs.
+    ordered = sorted(
+        channel_items,
+        key=lambda x: (0 if x.get("type") == "category" else 1, int(x.get("position", 0))),
+    )
+    restored_channels = []
     for item in ordered:
         old_id = int(item.get("id", 0))
-        existing = guild.get_channel(old_id)
-        if existing is None:
-            existing = discord.utils.get(guild.channels, name=item.get("name"), type={"text": discord.ChannelType.text, "voice": discord.ChannelType.voice, "category": discord.ChannelType.category, "stage_voice": discord.ChannelType.stage_voice}.get(item.get("type")))
         category = channel_map.get(int(item.get("category_id") or 0))
         if category is None and item.get("category_id"):
             old_cat = next((c for c in channel_items if int(c.get("id", 0)) == int(item["category_id"])), None)
             if old_cat:
                 category = discord.utils.get(guild.categories, name=old_cat.get("name"))
+
         overwrites = {}
         for ow in item.get("overwrites", []):
             target_id = int(ow.get("id", 0))
@@ -4618,29 +4660,64 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
             allow = discord.Permissions(int(ow.get("allow", 0)))
             deny = discord.Permissions(int(ow.get("deny", 0)))
             overwrites[target] = discord.PermissionOverwrite.from_pair(allow, deny)
+
+        ctype = item.get("type", "text")
+        name = str(item.get("name", "restored-channel"))[:100]
+        reason = "Kanade backup restore: recreating saved channel layout"
+        common = {"name": name, "category": category, "overwrites": overwrites, "reason": reason}
         try:
-            if existing is None:
-                ctype = item.get("type")
-                common = {"name": item["name"], "category": category, "overwrites": overwrites, "reason": "Kanade Premium backup restore"}
-                if ctype == "category":
-                    existing = await guild.create_category(item["name"], overwrites=overwrites, reason=common["reason"])
-                elif ctype == "voice":
-                    existing = await guild.create_voice_channel(**common, bitrate=int(item.get("bitrate", 64000)), user_limit=int(item.get("user_limit", 0)))
-                elif ctype == "stage_voice":
-                    existing = await guild.create_stage_channel(**common)
-                elif ctype == "forum":
-                    existing = await guild.create_forum(**common)
-                else:
-                    existing = await guild.create_text_channel(**common, topic=item.get("topic"), nsfw=bool(item.get("nsfw", False)), slowmode_delay=int(item.get("slowmode_delay", 0)))
-                channel_map[old_id] = existing
+            # Reuse the Discord-provided protected #moderators channel when the
+            # selected backup also contains one, rather than creating a duplicate.
+            protected_moderators = None
+            if name.casefold() == "moderators" and ctype in ("text", "news"):
+                protected_moderators = discord.utils.get(guild.text_channels, name=name)
+            if protected_moderators is not None:
+                channel = protected_moderators
+                await channel.edit(
+                    category=category,
+                    topic=item.get("topic"),
+                    nsfw=bool(item.get("nsfw", False)),
+                    slowmode_delay=int(item.get("slowmode_delay", 0)),
+                    overwrites=overwrites,
+                    reason="Kanade backup restore: applying saved settings to protected moderators channel",
+                )
+            elif ctype == "category":
+                channel = await guild.create_category(name, overwrites=overwrites, reason=reason)
+            elif ctype == "voice":
+                kwargs = {"bitrate": int(item.get("bitrate", 64000)), "user_limit": int(item.get("user_limit", 0))}
+                if item.get("rtc_region") and item.get("rtc_region") != "None":
+                    kwargs["rtc_region"] = item["rtc_region"]
+                channel = await guild.create_voice_channel(**common, **kwargs)
+            elif ctype == "stage_voice":
+                channel = await guild.create_stage_channel(**common)
+            elif ctype == "forum":
+                channel = await guild.create_forum(**common)
             else:
-                # Apply saved overwrites to listed targets without deleting unrelated extra overwrites.
-                for target, overwrite in overwrites.items():
-                    await existing.set_permissions(target, overwrite=overwrite, reason="Kanade Premium backup restore")
-                channel_map[old_id] = existing
+                channel = await guild.create_text_channel(
+                    **common,
+                    topic=item.get("topic"),
+                    nsfw=bool(item.get("nsfw", False)),
+                    slowmode_delay=int(item.get("slowmode_delay", 0)),
+                    news=(ctype == "news"),
+                )
+            channel_map[old_id] = channel
+            restored_channels.append((channel, int(item.get("position", 0)), ctype))
         except (discord.Forbidden, discord.HTTPException, TypeError, ValueError) as exc:
-            logger.warning("Backup restore could not create channel %s in %s: %s", item.get("name"), guild.id, exc)
-    return len(role_map), len(channel_map)
+            raise RuntimeError(f"Could not recreate channel `{name}` ({ctype}): {exc}") from exc
+
+    # Apply positions after all channels exist, preserving the saved ordering.
+    for channel, saved_position, ctype in restored_channels:
+        try:
+            if ctype == "category":
+                await channel.edit(position=saved_position, reason="Kanade backup restore: restoring category order")
+            else:
+                await channel.edit(position=saved_position, reason="Kanade backup restore: restoring channel order")
+        except (discord.Forbidden, discord.HTTPException):
+            # Discord may normalize positions when protected channels remain; channel
+            # creation and category membership still succeed, so continue safely.
+            logger.warning("Could not apply position %s to restored channel %s", saved_position, channel.name)
+
+    return len(created_roles) + 1, len(restored_channels)
 
 
 @bot.group(name="backup", invoke_without_command=True)
@@ -4676,12 +4753,12 @@ async def backup_load(ctx, code: str = None):
         return await ctx.reply(embed=feature_embed("Access Denied", "Administrator permission is required.", color=discord.Color.red()), mention_author=False)
     if not await require_premium(ctx):
         return
-    # Explicit confirmation is required because this removes every current channel/category.
+    # Explicit confirmation is required because this replaces channels and removable roles.
     prompt = await ctx.reply(
         embed=feature_embed(
             "Confirm Channel Replacement",
-            "This will **delete every existing channel and category** in this server, then recreate the backup layout.\n"
-            "Roles are not deleted. React with ✅ within 30 seconds to continue, or ❌ to cancel.",
+            "This will **delete existing channels and removable roles**, then rebuild the saved channels, role permissions, and role hierarchy. `@everyone`, Discord-managed roles, and the built-in `#moderators` channel are preserved.\n"
+            "React with ✅ within 30 seconds to continue, or ❌ to cancel.",
             color=discord.Color.orange(),
         ),
         mention_author=False,
@@ -5234,7 +5311,7 @@ async def slash_backup_create(interaction: discord.Interaction):
 @backup_slash_group.command(name="load", description="Restore a saved backup, optionally using a transfer code")
 @app_commands.describe(
     code="8-character backup transfer code; leave blank for this server's local backup",
-    confirm="Set to True to confirm deleting existing channels/categories",
+    confirm="Set to True to confirm replacing channels and removable roles",
 )
 async def slash_backup_load(interaction: discord.Interaction, code: str = None, confirm: bool = False):
     guild = interaction.guild
@@ -5248,7 +5325,7 @@ async def slash_backup_load(interaction: discord.Interaction, code: str = None, 
         return await interaction.response.send_message(
             embed=feature_embed(
                 "Confirmation Required",
-                "This restore will **delete every existing channel and category** and recreate those in the backup. Roles will not be deleted.\n"
+                "This restore will **delete existing channels and removable roles**, then rebuild the saved channels, role permissions, and role hierarchy. `@everyone`, Discord-managed roles, and the built-in `#moderators` channel are preserved.\n"
                 "Run `/backup load` again with the same code and set **confirm** to **True** to proceed.",
                 color=discord.Color.orange(),
             ), ephemeral=True
