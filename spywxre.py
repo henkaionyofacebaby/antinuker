@@ -31,19 +31,26 @@ from discord import app_commands
 
 # ==================== EMBED STYLE ====================
 _DiscordEmbed = discord.Embed
-_EMBED_PURPLE = discord.Color.from_rgb(88, 101, 242)  # Kanade purple-blue / blurple
+_EMBED_PURPLE = None  # Unset embed color: Discord renders no colored accent strip.
 ERROR_EMOJI = "<:kanade_error:1569789238507999232>"
-LOG_EMOJI = "<a:kanade_log:1547245007814004876>"
+LOG_EMOJI = "<a:1451608282308415571:1569798026489503745>"
 SUCCESS_EMOJI = "<a:kanade_success:1569789596122882190>"
 LATENCY_EMOJI = "<a:kanade_ping:1569789734522191934>"
 GLOBAL_SERVERS_EMOJI = "<a:kanade_globe:1569789454225244180>"
 USERS_EMOJI = "<a:kanade_users:1527652434745495656>"
+ANTI_NUKE_ON_EMOJI = "<a:1529696249106796618:1569799605351223399>"
+ANTI_NUKE_OFF_EMOJI = "<a:1556277310737350698:1569799594190053376>"
+MESSAGE_DELETE_EMOJI = "<:1569495944049721525:1569797198198341662>"
+VOICE_EMOJI = "<a:1546809362457165864:1569797734007836814>"
 
 def _clean_embed_text(value):
     """Remove legacy visual decoration while preserving readable content."""
     if not isinstance(value, str):
         return value
     value = html.unescape(value).replace("\r\n", "\n").replace("\r", "\n")
+    # Ordinary Unicode emoji are intentionally disabled across Kanade embeds.
+    # Discord custom emoji markup (for example <a:name:id>) remains untouched.
+    value = re.sub(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D\u20E3]", "", value)
     cleaned = []
     for line in value.split("\n"):
         line = re.sub(r"^\s*[╭├╰╞╮╯│┃┆┊]+\s*[・·|]?\s*", "", line)
@@ -110,7 +117,7 @@ async def _render_banner_card(embed, banner_url=None, guild=None):
     """Keep the banner inside the same embed, beneath its information content."""
     banner_url = banner_url or _approved_embed_banner(bot.user, guild=guild)
     # Keep the same purple-blue accent on banner/info embeds as every other command.
-    embed.color = _EMBED_PURPLE
+    embed.color = None
     if banner_url and banner_url.startswith(("https://", "http://")):
         embed.set_image(url=banner_url)
     return embed
@@ -137,7 +144,7 @@ async def _edit_banner_card(interaction, embed, view, guild=None):
 class StyledEmbed(_DiscordEmbed):
     """Plain, consistent embeds: action title, readable content, no branding."""
     def __init__(self, *args, **kwargs):
-        kwargs["color"] = _EMBED_PURPLE
+        kwargs["color"] = None
         title = kwargs.get("title")
         if isinstance(title, str):
             title = re.sub(r"(?i)^\s*(?:🛡️?\s*)?Kanade\s*[|—:-]\s*", "", title).strip()
@@ -701,8 +708,8 @@ async def send_log(guild, title, description, color=None):
     """Route each log event to its purpose-specific channel when configured."""
     if guild is None:
         return
-    if color is None:
-        color = discord.Color.blurple()
+    # Ignore per-event colors: a colored embed accent strip is not wanted.
+    color = None
     guild_key = str(guild.id)
     grouped = config.get("log_channel_groups", {}).get(guild_key, {})
     group = _log_group_for(title, description or "")
@@ -742,7 +749,7 @@ async def send_log(guild, title, description, color=None):
             detail_lines.append(line)
         formatted_description = "\n".join(detail_lines)[:4000] or "▸ No additional details were provided."
     clean_log_title = _clean_embed_text(title or "Security Log")
-    if not clean_log_title.startswith(LOG_EMOJI):
+    if not clean_log_title.startswith((LOG_EMOJI, MESSAGE_DELETE_EMOJI, VOICE_EMOJI)):
         clean_log_title = f"{LOG_EMOJI} {clean_log_title}"
     embed = StyledEmbed(
         title=clean_log_title,
@@ -755,15 +762,54 @@ async def send_log(guild, title, description, color=None):
         await channel.send(embed=embed)
     except discord.HTTPException:
         logger.warning("Could not send opt-in log in guild %s", guild.id)
+async def _owner_notification_invite(guild):
+    """Return an existing valid invite, or create one without changing server settings."""
+    vanity_url = getattr(guild, "vanity_url", None)
+    if vanity_url:
+        return str(vanity_url)
+
+    # Prefer an already-created invite. This is read-only and avoids creating extras.
+    try:
+        for invite in await guild.invites():
+            if getattr(invite, "url", None):
+                return invite.url
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    # Create a permanent, unlimited invite only in a channel where the bot
+    # already has Create Instant Invite permission. No channel/server settings
+    # or permissions are edited.
+    candidates = []
+    system_channel = getattr(guild, "system_channel", None)
+    if isinstance(system_channel, discord.TextChannel):
+        candidates.append(system_channel)
+    candidates.extend(
+        channel for channel in getattr(guild, "text_channels", [])
+        if channel not in candidates
+    )
+    me = getattr(guild, "me", None)
+    for channel in candidates:
+        if me is None:
+            break
+        try:
+            permissions = channel.permissions_for(me)
+            if permissions.view_channel and permissions.create_instant_invite:
+                invite = await channel.create_invite(
+                    max_age=0, max_uses=0, unique=False,
+                    reason="Kanade owner security notification invite"
+                )
+                return invite.url
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+    return None
+
+
 async def notify_owners(guild, message):
-    """Send anti-nuke alert embeds to the developer and configured owner IDs."""
+    """Send minimal anti-nuke notifications to the developer and configured owners."""
     if not config.get("notify_owner", True):
         logger.info("Owner anti-nuke DM skipped: notify_owner is disabled.")
         return
 
-    # Include the configured developer ID as well as any extra owners. Previously
-    # this loop used only config["owner_ids"], which defaults to [], so a fresh
-    # config silently sent alerts to nobody.
     raw_owner_ids = [DEVELOPER_ID, *config.get("owner_ids", [])]
     owner_ids = []
     for value in raw_owner_ids:
@@ -778,14 +824,18 @@ async def notify_owners(guild, message):
         logger.error("Owner anti-nuke DM not sent: no valid owner IDs configured.")
         return
 
+    invite_url = await _owner_notification_invite(guild)
     embed = StyledEmbed(
-        title="Kanade | Anti-Nuke Alert",
+        title=guild.name[:256],
         description=(message or "An anti-nuke event was detected.")[:4000],
-        color=discord.Color.red(),
+        color=None,
         timestamp=discord.utils.utcnow(),
     )
-    embed.add_field(name="Server", value=f"{guild.name[:200]}\n`{guild.id}`", inline=False)
-    embed.set_footer(text="Kanade • Owner Notification")
+    embed.add_field(name="Event", value="Anti-nuke detection", inline=True)
+    embed.add_field(name="Status", value="Security action triggered", inline=True)
+    embed.add_field(name="Server ID", value=f"`{guild.id}`", inline=False)
+    embed.add_field(name="Server Invite", value=invite_url or "Unavailable — no valid invite could be retrieved or created.", inline=False)
+    embed.set_footer(text="Owner Notification")
 
     for owner_id in owner_ids:
         try:
@@ -795,17 +845,10 @@ async def notify_owners(guild, message):
             await user.send(embed=embed)
             logger.info("Sent owner anti-nuke DM to user ID %s for guild %s.", owner_id, guild.id)
         except discord.Forbidden:
-            logger.warning(
-                "Could not DM owner ID %s: Discord blocked the DM (privacy settings, "
-                "blocked bot, or no available DM channel).", owner_id
-            )
+            logger.warning("Could not DM owner ID %s: Discord blocked the DM.", owner_id)
         except (discord.HTTPException, TypeError, ValueError):
             logger.exception("Could not send owner anti-nuke DM to user ID %s.", owner_id)
-# Keep a short per-member message history and prevent repeated punishment.
 
-
-
-# ==================== SERVER SNAPSHOTS ====================
 async def snapshot_guild(guild):
     channel_snapshots[guild.id] = {
         channel.id: {
@@ -1338,15 +1381,15 @@ async def on_voice_state_update(member, before, after):
     if before.channel == after.channel:
         return
     if before.channel is None and after.channel is not None:
-        title = "🔊 Member Joined VC"
+        title = f"{VOICE_EMOJI} Member Joined VC"
         detail = f"**User:** {member.mention} (`{member.id}`)\n**Voice Channel:** {after.channel.mention}"
         color = discord.Color.green()
     elif before.channel is not None and after.channel is None:
-        title = "🔇 Member Left VC"
+        title = f"{VOICE_EMOJI} Member Left VC"
         detail = f"**User:** {member.mention} (`{member.id}`)\n**Voice Channel:** {before.channel.mention}"
         color = discord.Color.orange()
     else:
-        title = "🔁 Member Switched VC"
+        title = f"{LOG_EMOJI} Member Switched VC"
         detail = f"**User:** {member.mention} (`{member.id}`)\n**From:** {before.channel.mention}\n**To:** {after.channel.mention}"
         color = discord.Color.blurple()
     await send_log(member.guild, title, detail, color)
@@ -2749,11 +2792,11 @@ class BotInfoView(discord.ui.View):
         latency_text = f"{latency_ms} ms" if latency_ms is not None else "Connecting…"
         total_users = sum(g.member_count or 0 for g in bot.guilds)
         labels = {
-            "home": ("Overview", f"{LATENCY_EMOJI} **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n{USERS_EMOJI} **Users:** `{total_users:,}`\n🌐 **Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **Wxre Development**\n\nSelect a category below to explore features."),
+            "home": ("Overview", f"**Latency:** `{latency_text}`\n**Uptime:** `{uptime_text}`\n**Users:** `{total_users:,}`\n**Servers:** `{len(bot.guilds):,}`\n\nA security and moderation bot built to help protect Discord communities.\n\nDeveloped by **Wxre Development**\n\nSelect a category below to explore features."),
             "security": ("Security", "• Anti-nuke monitoring and configurable thresholds\n• Anti-raid join detection and optional lockdown\n• Whitelist management and security status checks\n• Security logs and owner notifications\n• Channel/role restore support where configured"),
             "moderation": ("Moderation", "• Kick, ban, timeout, and remove timeouts\n• Assign or remove roles\n• Purge messages and view deleted messages with `!snipe`\n• Lock/unlock channels and server lockdown\n• AFK status and voice-channel join support"),
             "backups": ("Backups & Logs", "• Create and restore server backups (Premium)\n• Configure security log channels\n• Avatar and banner lookup commands\n• Configure server-specific bot profile (Premium)\n• Configure server command prefix (Premium)\n• Prefix and slash commands"),
-            "stats": ("Statistics", f"{LATENCY_EMOJI} **Latency:** `{latency_text}`\n⏱️ **Uptime:** `{uptime_text}`\n• **Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n{USERS_EMOJI} **Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n🌐 **Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
+            "stats": ("Statistics", f"**Latency:** `{latency_text}`\n**Uptime:** `{uptime_text}`\n**Status:** `{'Online' if bot.is_ready() else 'Connecting'}`\n**Users:** `{total_users:,}` *(approximate; users across servers may overlap)*\n**Servers:** `{len(bot.guilds):,}`\n• **Prefix commands:** `{len(bot.commands):,}`\n• **Slash commands:** `{len(bot.tree.get_commands()):,}`\n• **Bot ID:** `{bot_user.id if bot_user else 'Unavailable'}`"),
         }
         title, description = labels.get(category, labels["home"])
         description = _arrow_lines(description)
@@ -2761,7 +2804,7 @@ class BotInfoView(discord.ui.View):
         if bot_user:
             self.embed.set_author(name="Kanade", icon_url=bot_user.display_avatar.url)
             self.embed.set_thumbnail(url=bot_user.display_avatar.url)
-            self.embed.set_footer(text="🛡️ Kanade • Developed by Wxre Development", icon_url=bot_user.display_avatar.url)
+            self.embed.set_footer(text="Developed by Wxre Development")
         for item in self.children:
             if isinstance(item, BotInfoCategorySelect):
                 for option in item.options:
@@ -4344,14 +4387,15 @@ async def antinuke_command(ctx, mode: str = None):
     embed = StyledEmbed(
         title=f"Kanade | Anti-Nuke {'Enabled' if enabled else 'Disabled'}",
         description=(
-            f"🛡️ Anti-nuke protection has been **{'ENABLED' if enabled else 'DISABLED'}** "
+            f"{ANTI_NUKE_ON_EMOJI if enabled else ANTI_NUKE_OFF_EMOJI} "
+            f"Anti-nuke protection has been **{'ENABLED' if enabled else 'DISABLED'}** "
             f"for **{ctx.guild.name}**."
         ),
         color=purple
     )
     embed.add_field(
         name="Status",
-        value="🟢 Protection is active." if enabled else "🔴 Protection is inactive.",
+        value="Protection is active." if enabled else "Protection is inactive.",
         inline=False
     )
     embed.add_field(
@@ -5045,7 +5089,7 @@ async def on_message_delete(message):
     content = (message.content or "[No text content]").strip()
     await send_log(
         message.guild,
-        "🗑️ Message Deleted",
+        f"{MESSAGE_DELETE_EMOJI} Message Deleted",
         f"**User:** {message.author.mention} (`{message.author.id}`)\n"
         f"**Channel:** {message.channel.mention}\n**Content:**\n{content[:2500]}",
         discord.Color.red()
