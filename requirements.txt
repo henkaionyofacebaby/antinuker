@@ -6,3 +6,4 @@ davey
 Pillow
 yt-dlp
 ffmpeg
+FFmpeg
