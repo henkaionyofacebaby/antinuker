@@ -5,3 +5,4 @@ PyNaCl
 davey
 Pillow
 yt-dlp
+ffmpeg
