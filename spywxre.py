@@ -582,7 +582,19 @@ def is_whitelisted(guild, user_id):
         return True
     guild_whitelists = config.get("guild_whitelists", {})
     user_ids = guild_whitelists.get(str(guild.id), [])
-    return user_id in user_ids
+    if user_id in user_ids:
+        return True
+    # Whitelisted roles: any member holding one of them is whitelisted.
+    role_ids = {
+        int(value)
+        for value in config.get("guild_whitelist_roles", {}).get(str(guild.id), [])
+        if str(value).isdigit()
+    }
+    if role_ids:
+        member = guild.get_member(user_id)
+        if member is not None and any(role.id in role_ids for role in member.roles):
+            return True
+    return False
 def is_bot_admin_id(user_id):
     """Bot-level staff access, independent of Discord server roles/permissions."""
     if user_id is None:
@@ -1224,6 +1236,10 @@ async def on_ready():
             bot.add_view(J2CControlView())
             bot.add_view(ConfessionReportView())
             bot.add_view(ConfessionSubmitView())
+            bot.add_view(TicketOpenButtonView())
+            bot.add_view(TicketTypeSelectView())
+            bot.add_view(TicketControlView())
+            bot.add_view(TicketClosedView())
             for _giveaway_id, _giveaway in config.get("giveaways", {}).items():
                 if not _giveaway.get("ended"):
                     bot.add_view(GiveawayJoinView(_giveaway_id))
@@ -1232,6 +1248,8 @@ async def on_ready():
             logger.exception("Could not register persistent Kanade controls")
     if not giveaway_expiry_loop.is_running():
         giveaway_expiry_loop.start()
+    if not ticket_autoclose_loop.is_running():
+        ticket_autoclose_loop.start()
     await update_presence()
     if not presence_refresh_loop.is_running():
         presence_refresh_loop.start()
@@ -2421,6 +2439,9 @@ class HelpCategorySelect(discord.ui.Select):
             discord.SelectOption(label="Protection", value="protection", description="Anti-nuke, anti-spam, anti-link, and whitelist"),
             discord.SelectOption(label="Backups & Logs", value="backups", description="Backups and security logging"),
             discord.SelectOption(label="Information", value="utilities", description="Bot/server information and utility commands"),
+            discord.SelectOption(label="Music", value="music", description="Play, queue, filters, DJ controls"),
+            discord.SelectOption(label="Tickets", value="tickets", description="Ticket panels, claiming, transcripts"),
+            discord.SelectOption(label="Autoresponder", value="autoresponder", description="Trigger-based automatic replies"),
             discord.SelectOption(label="Premium", value="premium", description="Premium customization commands"),
             discord.SelectOption(label="Configuration", value="configuration", description="Prefix and help commands"),
         ]
@@ -2478,6 +2499,8 @@ class HelpView(discord.ui.View):
                            f"`{p}antilink exempt @member` / `{p}antilink unexempt @member` — Manage exemptions\n"
                            f"`{p}whitelist add @member` / `{p}whitelist remove @member` — Edit whitelist\n"
                            f"`{p}whitelist list` — View whitelist\n"
+                           f"`{p}whitelist roleadd @role` / `{p}whitelist roleremove @role` — Whitelist a role\n"
+                           f"`{p}whitelist rolelist` — View whitelisted roles\n"
                            f"`{p}honeypot on/off/status` — Detect suspicious token scams and malware bait (logs to #honeypot-logs)\n"
                            "`/lockdown` / `/unlockdown` — Slash-command lockdown controls"),
             "backups": ("Backups & Logs",
@@ -2499,6 +2522,54 @@ class HelpView(discord.ui.View):
                           f"`{p}leaderboard` — View the server XP leaderboard\n"
                           f"`{p}giveaway start 1h 1 Prize` — Start a giveaway\n"
                           f"`{p}counting setup [#channel]` — Set up the counting game"),
+            "music": ("Music",
+                      f"`{p}play <song|link>` (`{p}p`) — Play or queue a song, link or playlist\n"
+                      f"`{p}playnext <song>` (`{p}pn`) — Queue a song at the top\n"
+                      f"`{p}playskip <song>` (`{p}ps`) — Play a song right now\n"
+                      f"`{p}search <query>` — Pick from search results\n"
+                      f"`{p}join` / `{p}leave` (`{p}dc`) — Join or leave your voice channel\n"
+                      f"`{p}pause` / `{p}resume` / `{p}stop` — Playback controls\n"
+                      f"`{p}skip` (`{p}s`) — Skip (vote skip when others are listening)\n"
+                      f"`{p}forceskip` (`{p}fs`) — Skip instantly (DJ)\n"
+                      f"`{p}skipto <position>` / `{p}previous` — Jump around the queue\n"
+                      f"`{p}queue [page]` (`{p}q`) — Show the queue\n"
+                      f"`{p}np` (`{p}nowplaying`) — Show the current track\n"
+                      f"`{p}volume [0-200]` — Show or set the volume\n"
+                      f"`{p}loop [off|track|queue]` — Loop mode\n"
+                      f"`{p}shuffle` / `{p}clear` — Shuffle or clear the queue\n"
+                      f"`{p}remove <pos|range>` / `{p}move <from> <to>` — Edit the queue\n"
+                      f"`{p}seek <time>` / `{p}forward [s]` / `{p}rewind [s]` / `{p}replay` — Seek\n"
+                      f"`{p}filter <name>` — Audio filters; also `{p}bassboost`, `{p}nightcore`, `{p}8d`, `{p}vaporwave`\n"
+                      f"`{p}autoplay` — Queue related tracks automatically\n"
+                      f"`{p}history` / `{p}grab` — Recent tracks, or DM yourself the current one\n"
+                      f"`{p}djrole @role` / `{p}djoff` — Set or remove the DJ role (admin)\n"
+                      f"`{p}247` — Stay in the voice channel (admin)"),
+            "tickets": ("Tickets",
+                        f"`{p}ticket setup` — Create ticket categories and the log channel\n"
+                        f"`{p}ticket panel [#channel]` — Post the ticket panel\n"
+                        f"`{p}ticket config` — View ticket settings\n"
+                        f"`{p}ticket category <#category>` / `{p}ticket closedcategory <#category>`\n"
+                        f"`{p}ticket logs <#channel>` — Set the log and transcript channel\n"
+                        f"`{p}ticket support add|remove|list [@role]` — Support roles\n"
+                        f"`{p}ticket type add|remove|list` — Ticket types (dropdown panel)\n"
+                        f"`{p}ticket max|format|welcome|panelset|toggle|autoclose` — Customize tickets\n"
+                        f"`{p}ticket blacklist add|remove|list [@user]` — Block users\n"
+                        f"`{p}ticket stats` — Ticket statistics\n"
+                        f"`{p}close [reason]` / `{p}claim` / `{p}unclaim` — Inside a ticket\n"
+                        f"`{p}ticket add|remove @user` / `{p}ticket rename <name>` / `{p}ticket priority <level>`\n"
+                        f"`{p}ticket transfer @staff` / `{p}ticket transcript` / `{p}ticket reopen` / `{p}ticket delete`"),
+            "autoresponder": ("Autoresponder",
+                              f"`{p}ar add [mode] <trigger> | <response>` — Create an autoresponder\n"
+                              f"`{p}ar remove <id|trigger>` / `{p}ar edit <id> <response>` — Manage one\n"
+                              f"`{p}ar list` / `{p}ar info <id>` — View autoresponders\n"
+                              f"`{p}ar toggle <id>` — Enable or disable\n"
+                              f"`{p}ar mode <id> <exact|contains|word|starts|ends|wildcard>` — Match mode\n"
+                              f"`{p}ar cooldown <id> <seconds>` — Per-channel cooldown\n"
+                              f"`{p}ar reply|embed|deletetrigger|case <id> on|off` — Behavior options\n"
+                              f"`{p}ar channels <id> add|remove|clear [#channel]` — Limit to channels\n"
+                              f"`{p}ar clear` — Remove all\n"
+                              "`/autoresponder add|remove|list|toggle` — Slash versions\n\n"
+                              "Variables: `{user}` `{user.mention}` `{server}` `{membercount}` `{channel}` `{random:1-100}` `{choose:a|b|c}`"),
             "premium": ("Premium",
                         f"`{p}cb <image URL>` — Change the bot's banner (Premium)\n"
                         f"`{p}cp <image URL>` — Change the bot's profile picture (Premium)\n"
@@ -2584,7 +2655,7 @@ class AdminHelpView(discord.ui.View):
                         f"`{p}admlist` — View the bot-admin list\n\n"
                         "Use IDs when a user mention cannot be resolved. Only authorized staff can run these commands."),
             "prefix": ("Prefix Access",
-                       f"`{p}np <user ID|@user>` — Allow no-prefix commands in this server\n"
+                       f"`{p}nplaying <user ID|@user>` — Allow no-prefix commands in this server\n"
                        f"`{p}npremove <user ID|@user>` — Remove this server's no-prefix access\n"
                        f"`{p}gnp <user ID|@user>` — Allow no-prefix commands globally\n"
                        f"`{p}gnpremove <user ID|@user>` — Remove global no-prefix access\n\n"
@@ -4411,7 +4482,8 @@ async def antinuke_command(ctx, mode: str = None):
 async def whitelist_command(ctx):
     await ctx.reply(
         "Usage: `!whitelist add @member`, "
-        "`!whitelist remove @member`, or `!whitelist list`",
+        "`!whitelist remove @member`, or `!whitelist list`. "
+        "For roles: `!whitelist roleadd @role`, `!whitelist roleremove @role`, or `!whitelist rolelist`",
         mention_author=False
     )
 @whitelist_command.command(name="add")
@@ -5111,12 +5183,12 @@ async def snipe_command(ctx):
     embed.set_footer(text="Kanade")
     await ctx.reply(embed=embed, mention_author=False)
 
-@bot.command(name="np")
+@bot.command(name="nplaying")
 async def no_prefix_guild_command(ctx, user: discord.User = None):
     if not is_bot_admin_id(ctx.author.id):
         return await ctx.reply(embed=feature_embed("Access Denied", "Only the bot owner and authorized bot admins can use this command.", color=discord.Color.red()), mention_author=False)
     if ctx.guild is None or user is None:
-        return await ctx.reply(embed=feature_embed("Usage", "Usage: `!np @user`"), mention_author=False)
+        return await ctx.reply(embed=feature_embed("Usage", "Usage: `!nplaying @user`"), mention_author=False)
     mapping = config.setdefault("guild_no_prefix", {})
     ids = set(int(x) for x in mapping.get(str(ctx.guild.id), []) if str(x).isdigit())
     ids.add(user.id)
@@ -5717,7 +5789,7 @@ async def slash_commands(interaction: discord.Interaction):
     description = (
         "**Protection:** `/antinuke status`, `/antinuke on`, `/antinuke off`, `/antispam`, `/antilink`, `/honeypot`\n\n"
         "**Moderation:** `/kick`, `/ban`, `/unban`, `/timeout`, `/untimeout`, `/purge`, `/role`, `/unrole`, `/lock`, `/unlock`, `/lockdown`, `/unlockdown`\n\n"
-        "**Utilities:** `/ping`, `/rank`, `/leaderboard`, `/xp`, `/counting`, `/roles`, `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/confess`, `/help`\n"
+        "**Utilities:** `/ping`, `/rank`, `/leaderboard`, `/xp`, `/counting`, `/roles`, `/afk`, `/snipe`, `/security`, `/status`, `/info`, `/serverinfo`, `/avatar`, `/prefix`, `/joinvc`, `/setuplogs`, `/disablelogs`, `/backup create`, `/backup load`, `/roleall`, `/unroleall`, `/whitelist`, `/whitelistrole`, `/autoresponder`, `/adminlist`, `/admlist`, `/changebanner`, `/changepicture`, `/steal`, `/botnick`, `/confess`, `/help`\n"
         "**Bot staff:** `/premium`, `/np`, `/npremove`, `/gnp`, `/gnpremove`, `/generatelink`, `/serverlists`\n\n"
         "Prefix commands remain available. Use `/help` if it is registered by your client, or `!help` / your server prefix plus `help` for the full guide."
     )
@@ -6561,6 +6633,3222 @@ async def antilink_command(ctx, mode: str = None, *, argument: str = None):
     embed.add_field(name="Status", value="ON" if enabled else "OFF", inline=True)
     embed.add_field(name="Allowed domains", value=", ".join(f"`{d}`" for d in domains[:15]) or "None", inline=False)
     await ctx.reply(embed=embed, mention_author=False)
+
+
+# ==================== KANADE UPDATE: WHITELIST ROLES / TICKETS / AUTORESPONDER / MUSIC ====================
+# Everything below is additive. Existing commands, listeners and security systems above are unchanged,
+# apart from the small hooks noted in the update summary (role-aware is_whitelisted, !nplaying, help pages).
+import io
+import math
+import random
+import shutil
+from urllib.parse import urlparse
+
+try:
+    import yt_dlp
+except Exception:  # yt-dlp is optional; only music commands need it.
+    yt_dlp = None
+    logger.warning("yt-dlp is not installed. Music commands will report that playback is unavailable.")
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# WHITELIST ROLES
+# ---------------------------------------------------------------------------
+@whitelist_command.command(name="roleadd", aliases=["addrole", "ra"])
+@commands.guild_only()
+async def whitelist_role_add(ctx, role: discord.Role):
+    if not await manager_check(ctx):
+        return
+    if role.is_default():
+        return await ctx.reply("The @everyone role cannot be whitelisted.", mention_author=False)
+    mapping = config.setdefault("guild_whitelist_roles", {})
+    role_ids = mapping.setdefault(str(ctx.guild.id), [])
+    if role.id in role_ids:
+        return await ctx.reply("That role is already whitelisted.", mention_author=False)
+    role_ids.append(role.id)
+    save_config()
+    await send_log(
+        ctx.guild,
+        "▸ Server Whitelist Added",
+        f"Role {role.mention} (`{role.id}`) added by {ctx.author.mention} (`{ctx.author.id}`). "
+        "Members holding this role are now whitelisted.",
+    )
+    await ctx.reply("Role added to whitelist. Members with this role are now whitelisted.", mention_author=False)
+
+
+@whitelist_command.command(name="roleremove", aliases=["removerole", "rr"])
+@commands.guild_only()
+async def whitelist_role_remove(ctx, role: discord.Role):
+    if not await manager_check(ctx):
+        return
+    mapping = config.setdefault("guild_whitelist_roles", {})
+    guild_key = str(ctx.guild.id)
+    role_ids = mapping.get(guild_key, [])
+    if role.id not in role_ids:
+        return await ctx.reply("That role is not whitelisted.", mention_author=False)
+    role_ids.remove(role.id)
+    if not role_ids:
+        mapping.pop(guild_key, None)
+    save_config()
+    await send_log(
+        ctx.guild,
+        "▸ Server Whitelist Removed",
+        f"Role {role.mention} (`{role.id}`) removed by {ctx.author.mention} (`{ctx.author.id}`).",
+    )
+    await ctx.reply("Role removed from whitelist.", mention_author=False)
+
+
+def _whitelist_roles_embed(guild):
+    role_ids = [int(x) for x in config.get("guild_whitelist_roles", {}).get(str(guild.id), []) if str(x).isdigit()]
+    embed = StyledEmbed(
+        title="Kanade | Whitelisted Roles",
+        description=f"Whitelisted roles in **{guild.name}**",
+        color=discord.Color.from_rgb(128, 0, 255),
+    )
+    if not role_ids:
+        embed.add_field(name="Roles", value="No roles are whitelisted.", inline=False)
+    else:
+        lines = [f"`{i}.` <@&{rid}> (`{rid}`)" for i, rid in enumerate(role_ids, start=1)]
+        text = "\n".join(lines)
+        if len(text) > 1000:
+            text = text[:950].rsplit("\n", 1)[0] + "\n\nList shortened due to Discord's embed limit."
+        embed.add_field(name="Roles", value=text, inline=False)
+    embed.add_field(name="Total", value=str(len(role_ids)), inline=False)
+    embed.set_footer(text="Kanade")
+    return embed
+
+
+@whitelist_command.command(name="rolelist", aliases=["roles", "rl"])
+@commands.guild_only()
+async def whitelist_role_list(ctx):
+    if not await manager_check(ctx):
+        return
+    await ctx.reply(embed=_whitelist_roles_embed(ctx.guild), mention_author=False)
+
+
+@bot.listen("on_guild_role_delete")
+async def kanade_whitelist_role_cleanup(role):
+    """Drop deleted roles from the whitelist so stale IDs never linger."""
+    mapping = config.get("guild_whitelist_roles", {})
+    key = str(role.guild.id)
+    if isinstance(mapping, dict) and role.id in mapping.get(key, []):
+        mapping[key].remove(role.id)
+        if not mapping[key]:
+            mapping.pop(key, None)
+        save_config()
+
+
+@bot.tree.command(name="whitelistrole", description="Add, remove, or list whitelisted roles")
+@app_commands.describe(action="What to do", role="Role to add or remove")
+@app_commands.choices(action=[
+    app_commands.Choice(name="add", value="add"),
+    app_commands.Choice(name="remove", value="remove"),
+    app_commands.Choice(name="list", value="list"),
+])
+async def slash_whitelist_role(interaction: discord.Interaction, action: app_commands.Choice[str], role: discord.Role = None):
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+    if not has_admin_access(interaction.user):
+        return await interaction.response.send_message("Administrator access required.", ephemeral=True)
+    mapping = config.setdefault("guild_whitelist_roles", {})
+    guild_key = str(guild.id)
+    role_ids = mapping.get(guild_key, [])
+    if action.value == "list":
+        return await interaction.response.send_message(embed=_whitelist_roles_embed(guild), ephemeral=True)
+    if role is None:
+        return await interaction.response.send_message("Select a role for the add or remove action.", ephemeral=True)
+    if action.value == "add":
+        if role.is_default():
+            return await interaction.response.send_message("The @everyone role cannot be whitelisted.", ephemeral=True)
+        if role.id in role_ids:
+            return await interaction.response.send_message("That role is already whitelisted.", ephemeral=True)
+        role_ids.append(role.id)
+        mapping[guild_key] = role_ids
+        save_config()
+        await send_log(guild, "▸ Server Whitelist Added",
+                       f"Role {role.mention} (`{role.id}`) added by {interaction.user.mention} (`{interaction.user.id}`).")
+        return await interaction.response.send_message("Role added to whitelist.", ephemeral=True)
+    if role.id not in role_ids:
+        return await interaction.response.send_message("That role is not whitelisted.", ephemeral=True)
+    role_ids.remove(role.id)
+    if role_ids:
+        mapping[guild_key] = role_ids
+    else:
+        mapping.pop(guild_key, None)
+    save_config()
+    await send_log(guild, "▸ Server Whitelist Removed",
+                   f"Role {role.mention} (`{role.id}`) removed by {interaction.user.mention} (`{interaction.user.id}`).")
+    await interaction.response.send_message("Role removed from whitelist.", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# TICKETS (TicketKing-style: panels, types, claim, priority, transcripts, feedback, auto-close)
+# ---------------------------------------------------------------------------
+TICKET_PRIORITIES = ("low", "normal", "high", "urgent")
+TICKET_TOGGLES = {
+    "claim": ("claim", "Claim button and claiming"),
+    "transcripts": ("transcripts", "Transcripts on close"),
+    "dm": ("dm_transcript", "DM transcript to the ticket opener"),
+    "feedback": ("feedback", "Feedback rating request after close"),
+    "reason": ("ask_reason", "Ask for a subject/details when opening"),
+}
+
+
+class TicketError(Exception):
+    """Raised for user-facing ticket problems."""
+
+
+def _ticket_settings(guild_id):
+    root = config.setdefault("ticket_settings", {})
+    if not isinstance(root, dict):
+        root = {}
+        config["ticket_settings"] = root
+    settings = root.setdefault(str(guild_id), {})
+    defaults = {
+        "category_id": 0,
+        "closed_category_id": 0,
+        "log_channel_id": 0,
+        "support_role_ids": [],
+        "max_open": 1,
+        "counter": 0,
+        "name_format": "ticket-{number}",
+        "welcome": "Thanks for opening a ticket, {user}! A staff member will be with you shortly.",
+        "panel_title": "Support Tickets",
+        "panel_description": "Need help? Press the button below to open a ticket and our staff will assist you.",
+        "button_label": "Open Ticket",
+        "types": [],
+        "claim": True,
+        "transcripts": True,
+        "dm_transcript": True,
+        "feedback": True,
+        "ask_reason": True,
+        "autoclose_hours": 0,
+        "blacklist": [],
+        "opened_total": 0,
+        "closed_total": 0,
+        "rating_total": 0,
+        "rating_count": 0,
+    }
+    for key, value in defaults.items():
+        if key not in settings:
+            settings[key] = copy.deepcopy(value)
+    return settings
+
+
+def _ticket_records():
+    root = config.setdefault("tickets", {})
+    if not isinstance(root, dict):
+        root = {}
+        config["tickets"] = root
+    return root
+
+
+def _ticket_record(channel_id):
+    return _ticket_records().get(str(channel_id))
+
+
+def _ticket_is_staff(member, settings=None):
+    if member is None:
+        return False
+    if has_admin_access(member):
+        return True
+    settings = settings or _ticket_settings(member.guild.id)
+    support = {int(x) for x in settings.get("support_role_ids", []) if str(x).isdigit()}
+    return any(role.id in support for role in getattr(member, "roles", []))
+
+
+def _ticket_require(channel, actor, *, staff=False, owner_ok=False, system=False):
+    record = _ticket_record(channel.id)
+    if record is None:
+        raise TicketError("This channel is not a ticket.")
+    settings = _ticket_settings(channel.guild.id)
+    if system or _ticket_is_staff(actor, settings):
+        return record, settings
+    if owner_ok and actor.id == record.get("owner_id"):
+        return record, settings
+    raise TicketError("Only ticket staff can do that." if staff else "You can't manage this ticket.")
+
+
+def _ticket_format(text, member, guild, ticket_type=None):
+    mention = member.mention if member else "there"
+    name = member.display_name if member else "there"
+    return (
+        str(text)
+        .replace("{user}", mention)
+        .replace("{user.name}", name)
+        .replace("{server}", guild.name)
+        .replace("{type}", ticket_type or "Support")
+    )[:2000]
+
+
+def _ticket_channel_name(settings, member, ticket_type, number):
+    name = (
+        (settings.get("name_format") or "ticket-{number}")
+        .replace("{number}", f"{number:04d}")
+        .replace("{user}", member.name)
+        .replace("{type}", ticket_type or "ticket")
+    )
+    name = re.sub(r"[^a-z0-9\-_]+", "-", name.lower()).strip("-")
+    return (name or f"ticket-{number:04d}")[:90]
+
+
+def _ticket_find_type(settings, label):
+    if not label:
+        return None
+    for item in settings.get("types", []):
+        if item.get("label", "").lower() == str(label).lower():
+            return item
+    return None
+
+
+def _ticket_embed(guild, record, settings=None):
+    settings = settings or _ticket_settings(guild.id)
+    owner = guild.get_member(record["owner_id"])
+    description = _ticket_format(settings.get("welcome", ""), owner, guild, record.get("type"))
+    embed = StyledEmbed(
+        title=f"Ticket #{record['number']:04d}",
+        description=description,
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Opened by", value=owner.mention if owner else f"<@{record['owner_id']}>", inline=True)
+    embed.add_field(name="Type", value=record.get("type") or "Support", inline=True)
+    embed.add_field(name="Priority", value=str(record.get("priority", "normal")).title(), inline=True)
+    claimed = record.get("claimed_by")
+    embed.add_field(name="Claimed by", value=f"<@{claimed}>" if claimed else "Unclaimed", inline=True)
+    if record.get("subject"):
+        embed.add_field(name="Subject", value=record["subject"][:1024], inline=False)
+    if record.get("details"):
+        embed.add_field(name="Details", value=record["details"][:1024], inline=False)
+    embed.set_footer(text=f"Ticket #{record['number']:04d}")
+    return embed
+
+
+async def _ticket_refresh_message(channel, record):
+    message_id = record.get("message_id")
+    if not message_id:
+        return
+    try:
+        message = await channel.fetch_message(int(message_id))
+        await message.edit(embed=_ticket_embed(channel.guild, record))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def _ticket_build_transcript(channel, record):
+    rows = []
+    async for message in channel.history(limit=2000, oldest_first=True):
+        stamp = message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        author = html.escape(f"{message.author.display_name} ({message.author.id})")
+        content = html.escape(message.clean_content or "").replace("\n", "<br>")
+        extras = []
+        for attachment in message.attachments:
+            extras.append(f'<div class="att">Attachment: <a href="{html.escape(attachment.url)}">{html.escape(attachment.filename)}</a></div>')
+        for embed in message.embeds:
+            bits = [part for part in (embed.title, embed.description) if part]
+            if bits:
+                extras.append(f'<div class="emb">{html.escape(" - ".join(bits)[:1500]).replace(chr(10), "<br>")}</div>')
+        rows.append(
+            f'<div class="msg"><span class="who">{author}</span> <span class="ts">{stamp}</span>'
+            f'<div class="body">{content or "&nbsp;"}</div>{"".join(extras)}</div>'
+        )
+    title = html.escape(f"Ticket #{record['number']:04d} - {channel.guild.name}")
+    document = (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>" + title + "</title><style>"
+        "body{font-family:Arial,sans-serif;background:#1e1f22;color:#dbdee1;margin:0;padding:24px}"
+        "h1{font-size:20px}.msg{padding:8px 0;border-bottom:1px solid #2b2d31}.who{font-weight:bold;color:#fff}"
+        ".ts{color:#949ba4;font-size:12px;margin-left:8px}.body{margin-top:4px;word-wrap:break-word}"
+        ".att,.emb{margin-top:4px;font-size:13px;color:#b5bac1}a{color:#00a8fc}"
+        "</style></head><body><h1>" + title + "</h1>"
+        f"<p>Opened by {html.escape(str(record.get('owner_id')))} | Type: {html.escape(str(record.get('type') or 'Support'))}</p>"
+        + "".join(rows) + "</body></html>"
+    )
+    return document.encode("utf-8")
+
+
+def _ticket_transcript_file(data, record):
+    return discord.File(io.BytesIO(data), filename=f"transcript-{record['number']:04d}.html")
+
+
+async def _ticket_archive(channel, record, actor, reason):
+    """Send the transcript to the log channel and (optionally) DM the opener."""
+    guild = channel.guild
+    settings = _ticket_settings(guild.id)
+    data = None
+    if settings.get("transcripts", True):
+        try:
+            data = await _ticket_build_transcript(channel, record)
+        except Exception:
+            logger.exception("Could not build ticket transcript")
+    log_channel = guild.get_channel(int(settings.get("log_channel_id") or 0))
+    claimed = record.get("claimed_by")
+    embed = StyledEmbed(title="Ticket Closed", timestamp=discord.utils.utcnow())
+    embed.add_field(name="Ticket", value=f"#{record['number']:04d} ({channel.name})", inline=True)
+    embed.add_field(name="Opened by", value=f"<@{record['owner_id']}>", inline=True)
+    embed.add_field(name="Closed by", value=actor.mention, inline=True)
+    embed.add_field(name="Claimed by", value=f"<@{claimed}>" if claimed else "Nobody", inline=True)
+    embed.add_field(name="Type", value=record.get("type") or "Support", inline=True)
+    embed.add_field(name="Reason", value=(reason or "No reason provided")[:1024], inline=False)
+    if isinstance(log_channel, discord.TextChannel) and log_channel.permissions_for(guild.me).send_messages:
+        try:
+            await log_channel.send(embed=embed, files=[_ticket_transcript_file(data, record)] if data else [])
+        except discord.HTTPException:
+            logger.warning("Could not send ticket log in guild %s", guild.id)
+    if settings.get("dm_transcript", True):
+        owner = guild.get_member(record["owner_id"])
+        if owner is not None:
+            dm_embed = StyledEmbed(
+                title="Your ticket was closed",
+                description=f"Your ticket #{record['number']:04d} in **{guild.name}** has been closed.\n**Reason:** {(reason or 'No reason provided')[:900]}",
+                timestamp=discord.utils.utcnow(),
+            )
+            view = TicketFeedbackView(guild.id, record["number"]) if settings.get("feedback", True) else None
+            try:
+                await owner.send(embed=dm_embed, files=[_ticket_transcript_file(data, record)] if data else [], view=view)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+
+async def ticket_close(channel, actor, reason=None, *, system=False):
+    record, settings = _ticket_require(channel, actor, owner_ok=True, system=system)
+    if record.get("status") != "open":
+        raise TicketError("This ticket is already closed.")
+    reason = (reason or "No reason provided").strip()[:500]
+    record.update(status="closed", closed_by=actor.id, closed_at=_now_iso(), close_reason=reason)
+    settings["closed_total"] = int(settings.get("closed_total", 0)) + 1
+    save_config()
+    guild = channel.guild
+    closed_embed = StyledEmbed(
+        title="Ticket Closed",
+        description=f"Closed by {actor.mention}.\n**Reason:** {reason}\n\nStaff can reopen or delete this ticket with the buttons below.",
+        timestamp=discord.utils.utcnow(),
+    )
+    try:
+        await channel.send(embed=closed_embed, view=TicketClosedView())
+    except discord.HTTPException:
+        pass
+    await _ticket_archive(channel, record, actor, reason)
+    # Remove the opener's (and added users') access after the transcript is captured.
+    revoke = [record.get("owner_id")] + list(record.get("added", []))
+    for user_id in revoke:
+        member = guild.get_member(int(user_id)) if user_id else None
+        if member is not None and not _ticket_is_staff(member, settings):
+            try:
+                await channel.set_permissions(member, overwrite=None, reason="Ticket closed")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+    closed_category = guild.get_channel(int(settings.get("closed_category_id") or 0))
+    if isinstance(closed_category, discord.CategoryChannel):
+        try:
+            await channel.edit(category=closed_category, sync_permissions=False, reason="Ticket closed")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def ticket_reopen(channel, actor):
+    record, settings = _ticket_require(channel, actor, staff=True)
+    if record.get("status") == "open":
+        raise TicketError("This ticket is already open.")
+    guild = channel.guild
+    record.update(status="open", closed_by=None, closed_at=None, close_reason=None)
+    save_config()
+    owner = guild.get_member(record["owner_id"])
+    if owner is not None:
+        try:
+            await channel.set_permissions(owner, view_channel=True, send_messages=True, read_message_history=True,
+                                          attach_files=True, embed_links=True, reason="Ticket reopened")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    for user_id in record.get("added", []):
+        member = guild.get_member(int(user_id))
+        if member is not None:
+            try:
+                await channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True,
+                                              attach_files=True, embed_links=True, reason="Ticket reopened")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+    category = guild.get_channel(int(settings.get("category_id") or 0))
+    if isinstance(category, discord.CategoryChannel) and channel.category_id != category.id:
+        try:
+            await channel.edit(category=category, sync_permissions=False, reason="Ticket reopened")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    return StyledEmbed(title="Ticket Reopened", description=f"Reopened by {actor.mention}.", timestamp=discord.utils.utcnow())
+
+
+async def ticket_delete(channel, actor):
+    record, settings = _ticket_require(channel, actor, staff=True)
+    if record.get("status") == "open":
+        # Closing was skipped, so archive the transcript before the channel disappears.
+        await _ticket_archive(channel, record, actor, "Ticket deleted")
+        settings["closed_total"] = int(settings.get("closed_total", 0)) + 1
+    try:
+        await channel.send(embed=StyledEmbed(title="Ticket Deleted", description="This channel will be deleted in 5 seconds."))
+    except discord.HTTPException:
+        pass
+    await asyncio.sleep(5)
+    _ticket_records().pop(str(channel.id), None)
+    save_config()
+    try:
+        await channel.delete(reason=f"Ticket deleted by {actor}")
+    except (discord.Forbidden, discord.HTTPException):
+        raise TicketError("I could not delete this channel. Check my Manage Channels permission.")
+
+
+async def ticket_claim(channel, actor, *, target=None, unclaim=False):
+    record, settings = _ticket_require(channel, actor, staff=True)
+    if not settings.get("claim", True):
+        raise TicketError("Claiming is disabled in this server.")
+    if record.get("status") != "open":
+        raise TicketError("This ticket is closed.")
+    if unclaim:
+        if not record.get("claimed_by"):
+            raise TicketError("This ticket is not claimed.")
+        if record["claimed_by"] != actor.id and not has_admin_access(actor):
+            raise TicketError("Only the claimer or an administrator can unclaim this ticket.")
+        record["claimed_by"] = None
+        text = f"{actor.mention} released this ticket."
+    else:
+        new_owner = target or actor
+        if not _ticket_is_staff(new_owner, settings):
+            raise TicketError("The new claimer must be ticket staff.")
+        if record.get("claimed_by") and record["claimed_by"] != actor.id and target is None and not has_admin_access(actor):
+            raise TicketError(f"This ticket is already claimed by <@{record['claimed_by']}>.")
+        record["claimed_by"] = new_owner.id
+        text = f"{new_owner.mention} is now handling this ticket." if target is None else f"{actor.mention} transferred this ticket to {new_owner.mention}."
+    save_config()
+    await _ticket_refresh_message(channel, record)
+    return StyledEmbed(title="Ticket Claimed" if not unclaim else "Ticket Released", description=text)
+
+
+async def ticket_set_priority(channel, actor, level):
+    record, _ = _ticket_require(channel, actor, staff=True)
+    level = level.lower()
+    if level not in TICKET_PRIORITIES:
+        raise TicketError("Priority must be one of: " + ", ".join(TICKET_PRIORITIES) + ".")
+    record["priority"] = level
+    save_config()
+    await _ticket_refresh_message(channel, record)
+    return StyledEmbed(title="Ticket Updated", description=f"Priority set to **{level.title()}**.")
+
+
+async def ticket_add_user(channel, actor, member):
+    record, _ = _ticket_require(channel, actor, staff=True)
+    if record.get("status") != "open":
+        raise TicketError("This ticket is closed.")
+    try:
+        await channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True,
+                                      attach_files=True, embed_links=True, reason=f"Added to ticket by {actor}")
+    except (discord.Forbidden, discord.HTTPException):
+        raise TicketError("I could not update permissions for that member.")
+    added = record.setdefault("added", [])
+    if member.id not in added and member.id != record.get("owner_id"):
+        added.append(member.id)
+    save_config()
+    return StyledEmbed(title="Ticket Updated", description=f"{member.mention} was added to this ticket.")
+
+
+async def ticket_remove_user(channel, actor, member):
+    record, settings = _ticket_require(channel, actor, staff=True)
+    if member.id == record.get("owner_id"):
+        raise TicketError("You can't remove the ticket opener.")
+    if _ticket_is_staff(member, settings):
+        raise TicketError("You can't remove ticket staff.")
+    try:
+        await channel.set_permissions(member, overwrite=None, reason=f"Removed from ticket by {actor}")
+    except (discord.Forbidden, discord.HTTPException):
+        raise TicketError("I could not update permissions for that member.")
+    if member.id in record.get("added", []):
+        record["added"].remove(member.id)
+    save_config()
+    return StyledEmbed(title="Ticket Updated", description=f"{member.mention} was removed from this ticket.")
+
+
+async def ticket_rename(channel, actor, name):
+    _ticket_require(channel, actor, staff=True)
+    cleaned = re.sub(r"[^a-z0-9\-_]+", "-", name.lower()).strip("-")[:90]
+    if not cleaned:
+        raise TicketError("Provide a valid channel name.")
+    try:
+        await channel.edit(name=cleaned, reason=f"Ticket renamed by {actor}")
+    except (discord.Forbidden, discord.HTTPException):
+        raise TicketError("I could not rename this channel (it may be rate limited).")
+    return StyledEmbed(title="Ticket Updated", description=f"Renamed to `{cleaned}`.")
+
+
+# ---------- Opening tickets ----------
+async def _create_ticket(interaction, ticket_type, subject, details):
+    guild = interaction.guild
+    member = interaction.user
+    settings = _ticket_settings(guild.id)
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
+    async def fail(text):
+        await interaction.followup.send(text, ephemeral=True)
+
+    if member.id in {int(x) for x in settings.get("blacklist", []) if str(x).isdigit()}:
+        return await fail("You are blocked from opening tickets in this server.")
+    records = _ticket_records()
+    open_count = 0
+    for cid, rec in list(records.items()):
+        if rec.get("guild_id") != guild.id:
+            continue
+        if guild.get_channel(int(cid)) is None:
+            records.pop(cid, None)
+            continue
+        if rec.get("owner_id") == member.id and rec.get("status") == "open":
+            open_count += 1
+    max_open = max(1, int(settings.get("max_open") or 1))
+    if open_count >= max_open:
+        return await fail(f"You already have {open_count} open ticket(s). Close one before opening another.")
+
+    type_label = ticket_type.get("label") if ticket_type else None
+    category = None
+    for candidate in ((ticket_type or {}).get("category_id"), settings.get("category_id")):
+        found = guild.get_channel(int(candidate or 0)) if candidate else None
+        if isinstance(found, discord.CategoryChannel):
+            category = found
+            break
+
+    settings["counter"] = int(settings.get("counter", 0)) + 1
+    number = settings["counter"]
+    base = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                       attach_files=True, embed_links=True)
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                              attach_files=True, embed_links=True),
+        member: base,
+    }
+    support_roles = []
+    for role_id in settings.get("support_role_ids", []):
+        role = guild.get_role(int(role_id))
+        if role is not None:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True,
+                                                           attach_files=True, embed_links=True, manage_messages=True)
+            support_roles.append(role)
+    try:
+        channel = await guild.create_text_channel(
+            name=_ticket_channel_name(settings, member, type_label, number),
+            category=category,
+            overwrites=overwrites,
+            topic=f"Ticket #{number:04d} | Opened by {member} ({member.id})",
+            reason=f"Ticket opened by {member}",
+        )
+    except discord.Forbidden:
+        settings["counter"] = number - 1
+        return await fail("I need the Manage Channels permission (and access to the ticket category) to create tickets.")
+    except discord.HTTPException as exc:
+        settings["counter"] = number - 1
+        return await fail(f"Discord refused to create the ticket channel: {exc.text[:150]}")
+
+    record = {
+        "guild_id": guild.id,
+        "owner_id": member.id,
+        "number": number,
+        "type": type_label,
+        "subject": (subject or "").strip()[:100] or None,
+        "details": (details or "").strip()[:1000] or None,
+        "status": "open",
+        "priority": "normal",
+        "claimed_by": None,
+        "added": [],
+        "opened_at": _now_iso(),
+    }
+    settings["opened_total"] = int(settings.get("opened_total", 0)) + 1
+    records[str(channel.id)] = record
+    pings = " ".join([member.mention] + [role.mention for role in support_roles])
+    try:
+        message = await channel.send(
+            content=pings,
+            embed=_ticket_embed(guild, record, settings),
+            view=TicketControlView(),
+            allowed_mentions=discord.AllowedMentions(users=[member], roles=support_roles, everyone=False),
+        )
+        record["message_id"] = message.id
+    except discord.HTTPException:
+        logger.warning("Could not post the ticket welcome message in guild %s", guild.id)
+    save_config()
+
+    log_channel = guild.get_channel(int(settings.get("log_channel_id") or 0))
+    if isinstance(log_channel, discord.TextChannel) and log_channel.permissions_for(guild.me).send_messages:
+        log_embed = StyledEmbed(title="Ticket Opened", description=f"{member.mention} opened {channel.mention}.", timestamp=discord.utils.utcnow())
+        log_embed.add_field(name="Type", value=type_label or "Support", inline=True)
+        log_embed.add_field(name="Ticket", value=f"#{number:04d}", inline=True)
+        if record["subject"]:
+            log_embed.add_field(name="Subject", value=record["subject"], inline=False)
+        try:
+            await log_channel.send(embed=log_embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
+    await interaction.followup.send(f"Your ticket has been created: {channel.mention}", ephemeral=True)
+
+
+class TicketOpenModal(discord.ui.Modal):
+    def __init__(self, type_label=None):
+        super().__init__(title="Open a Ticket")
+        self.type_label = type_label
+        self.subject = discord.ui.TextInput(label="Subject", max_length=100, placeholder="Briefly describe your issue")
+        self.details = discord.ui.TextInput(label="Details", style=discord.TextStyle.paragraph, required=False,
+                                            max_length=1000, placeholder="Add any extra information (optional)")
+        self.add_item(self.subject)
+        self.add_item(self.details)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        settings = _ticket_settings(interaction.guild.id)
+        await _create_ticket(interaction, _ticket_find_type(settings, self.type_label), self.subject.value, self.details.value)
+
+
+async def _ticket_begin(interaction, ticket_type):
+    if interaction.guild is None:
+        return await interaction.response.send_message("Tickets can only be opened in a server.", ephemeral=True)
+    settings = _ticket_settings(interaction.guild.id)
+    if settings.get("ask_reason", True):
+        return await interaction.response.send_modal(TicketOpenModal(ticket_type.get("label") if ticket_type else None))
+    await _create_ticket(interaction, ticket_type, None, None)
+
+
+class TicketOpenButtonView(discord.ui.View):
+    def __init__(self, label="Open Ticket"):
+        super().__init__(timeout=None)
+        self.open_button.label = (label or "Open Ticket")[:80]
+
+    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.primary, custom_id="kanade:ticket:open")
+    async def open_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _ticket_begin(interaction, None)
+
+
+class TicketTypeSelect(discord.ui.Select):
+    def __init__(self, types=None):
+        options = []
+        for item in (types or [])[:25]:
+            kwargs = {"label": item["label"][:100], "value": item["label"][:100]}
+            if item.get("description"):
+                kwargs["description"] = item["description"][:100]
+            if item.get("emoji"):
+                kwargs["emoji"] = item["emoji"]
+            options.append(discord.SelectOption(**kwargs))
+        if not options:
+            options = [discord.SelectOption(label="Open a ticket", value="Open a ticket")]
+        super().__init__(placeholder="Select a ticket type", min_values=1, max_values=1,
+                         options=options, custom_id="kanade:ticket:type")
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            return await interaction.response.send_message("Tickets can only be opened in a server.", ephemeral=True)
+        settings = _ticket_settings(interaction.guild.id)
+        await _ticket_begin(interaction, _ticket_find_type(settings, self.values[0]))
+        # Re-post the idle select so the same option can be picked again.
+        try:
+            await interaction.message.edit(view=TicketTypeSelectView(settings.get("types", [])))
+        except (discord.HTTPException, AttributeError):
+            pass
+
+
+class TicketTypeSelectView(discord.ui.View):
+    def __init__(self, types=None):
+        super().__init__(timeout=None)
+        self.add_item(TicketTypeSelect(types))
+
+
+class TicketCloseModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Close Ticket")
+        self.reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, max_length=500,
+                                           placeholder="Why is this ticket being closed?", required=False)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await ticket_close(interaction.channel, interaction.user, self.reason.value)
+            await interaction.followup.send("Closing ticket.", ephemeral=True)
+        except TicketError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+
+
+class TicketCloseConfirmView(discord.ui.View):
+    def __init__(self, actor_id):
+        super().__init__(timeout=60)
+        self.actor_id = actor_id
+
+    @discord.ui.button(label="Confirm Close", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.actor_id:
+            return await interaction.response.send_message("Only the person who pressed Close can confirm.", ephemeral=True)
+        await interaction.response.edit_message(content="Closing ticket...", view=None)
+        try:
+            await ticket_close(interaction.channel, interaction.user)
+        except TicketError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+
+
+class TicketControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="kanade:ticket:close")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            _ticket_require(interaction.channel, interaction.user, owner_ok=True)
+        except TicketError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.send_message("Are you sure you want to close this ticket?",
+                                                view=TicketCloseConfirmView(interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label="Close with Reason", style=discord.ButtonStyle.secondary, custom_id="kanade:ticket:closereason")
+    async def close_reason_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            _ticket_require(interaction.channel, interaction.user, owner_ok=True)
+        except TicketError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.send_modal(TicketCloseModal())
+
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.success, custom_id="kanade:ticket:claim")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            embed = await ticket_claim(interaction.channel, interaction.user)
+        except TicketError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.send_message(embed=embed)
+
+
+class TicketClosedView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Reopen", style=discord.ButtonStyle.success, custom_id="kanade:ticket:reopen")
+    async def reopen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            embed = await ticket_reopen(interaction.channel, interaction.user)
+        except TicketError as exc:
+            return await interaction.followup.send(str(exc), ephemeral=True)
+        await interaction.followup.send(embed=embed)
+
+    @discord.ui.button(label="Transcript", style=discord.ButtonStyle.secondary, custom_id="kanade:ticket:transcript")
+    async def transcript_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            record, _ = _ticket_require(interaction.channel, interaction.user, staff=True)
+        except TicketError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        data = await _ticket_build_transcript(interaction.channel, record)
+        await interaction.followup.send(file=_ticket_transcript_file(data, record), ephemeral=True)
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, custom_id="kanade:ticket:delete")
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            _ticket_require(interaction.channel, interaction.user, staff=True)
+        except TicketError as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.response.defer()
+        try:
+            await ticket_delete(interaction.channel, interaction.user)
+        except TicketError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+
+
+class TicketFeedbackView(discord.ui.View):
+    """Rating buttons sent with the DM transcript. Not persistent across restarts."""
+    def __init__(self, guild_id, number):
+        super().__init__(timeout=86400)
+        self.guild_id = guild_id
+        self.number = number
+        for score in range(1, 6):
+            button = discord.ui.Button(label=str(score), style=discord.ButtonStyle.secondary)
+            button.callback = self._make_callback(score)
+            self.add_item(button)
+
+    def _make_callback(self, score):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.edit_message(content=f"Thanks for rating your ticket {score}/5.", view=None)
+            guild = bot.get_guild(self.guild_id)
+            if guild is None:
+                return
+            settings = _ticket_settings(guild.id)
+            settings["rating_total"] = int(settings.get("rating_total", 0)) + score
+            settings["rating_count"] = int(settings.get("rating_count", 0)) + 1
+            save_config()
+            log_channel = guild.get_channel(int(settings.get("log_channel_id") or 0))
+            if isinstance(log_channel, discord.TextChannel) and log_channel.permissions_for(guild.me).send_messages:
+                try:
+                    await log_channel.send(
+                        embed=StyledEmbed(title="Ticket Feedback",
+                                          description=f"{interaction.user.mention} rated ticket #{self.number:04d}: **{score}/5**"),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except discord.HTTPException:
+                    pass
+        return callback
+
+
+@bot.listen("on_guild_channel_delete")
+async def kanade_ticket_channel_cleanup(channel):
+    records = _ticket_records()
+    if str(channel.id) in records:
+        records.pop(str(channel.id), None)
+        save_config()
+
+
+@tasks.loop(minutes=15)
+async def ticket_autoclose_loop():
+    now = discord.utils.utcnow()
+    for cid, record in list(_ticket_records().items()):
+        if record.get("status") != "open":
+            continue
+        guild = bot.get_guild(record.get("guild_id") or 0)
+        if guild is None:
+            continue
+        hours = int(_ticket_settings(guild.id).get("autoclose_hours") or 0)
+        channel = guild.get_channel(int(cid))
+        if hours <= 0 or not isinstance(channel, discord.TextChannel):
+            continue
+        if channel.last_message_id:
+            last = discord.utils.snowflake_time(channel.last_message_id)
+        else:
+            try:
+                last = datetime.fromisoformat(record.get("opened_at"))
+            except (TypeError, ValueError):
+                continue
+        if now - last > timedelta(hours=hours):
+            try:
+                await ticket_close(channel, guild.me, f"Closed automatically after {hours}h of inactivity.", system=True)
+            except Exception:
+                logger.exception("Ticket auto-close failed")
+
+
+@ticket_autoclose_loop.before_loop
+async def before_ticket_autoclose_loop():
+    await bot.wait_until_ready()
+
+
+# ---------- Ticket commands ----------
+async def _ticket_reply_error(ctx, exc):
+    await ctx.reply(str(exc), mention_author=False)
+
+
+@bot.group(name="ticket", aliases=["tickets"], invoke_without_command=True)
+@commands.guild_only()
+async def ticket_group(ctx):
+    p = ctx.clean_prefix
+    description = (
+        "**Setup (admins)**\n"
+        f"`{p}ticket setup` — Create the ticket categories and log channel\n"
+        f"`{p}ticket panel [#channel]` — Post the ticket panel\n"
+        f"`{p}ticket config` — View ticket settings\n"
+        f"`{p}ticket category <#category>` / `{p}ticket closedcategory <#category>`\n"
+        f"`{p}ticket logs <#channel>` — Set the log/transcript channel\n"
+        f"`{p}ticket support add|remove|list [@role]` — Manage support roles\n"
+        f"`{p}ticket type add|remove|list` — Manage ticket types (dropdown panel)\n"
+        f"`{p}ticket max <number>` — Open tickets allowed per user\n"
+        f"`{p}ticket format <text>` — Channel name format ({{number}}, {{user}}, {{type}})\n"
+        f"`{p}ticket welcome <text>` — Welcome message ({{user}}, {{server}}, {{type}})\n"
+        f"`{p}ticket panelset title|description|button <text>` — Customize the panel\n"
+        f"`{p}ticket toggle claim|transcripts|dm|feedback|reason` — Toggle features\n"
+        f"`{p}ticket autoclose <hours|off>` — Close inactive tickets\n"
+        f"`{p}ticket blacklist add|remove|list [@user]` — Block users from tickets\n"
+        f"`{p}ticket stats` — Ticket statistics\n\n"
+        "**Inside a ticket (staff)**\n"
+        f"`{p}close [reason]`, `{p}claim`, `{p}unclaim`, `{p}ticket add|remove @user`, "
+        f"`{p}ticket rename <name>`, `{p}ticket priority <low|normal|high|urgent>`, "
+        f"`{p}ticket transfer @staff`, `{p}ticket transcript`, `{p}ticket reopen`, `{p}ticket delete`, `{p}ticket info`"
+    )
+    await ctx.reply(embed=feature_embed("Ticket Commands", description), mention_author=False)
+
+
+def _ticket_channel_arg_error(ctx):
+    return ctx.reply("Run this inside a ticket channel.", mention_author=False)
+
+
+@ticket_group.command(name="setup")
+@commands.guild_only()
+async def ticket_setup(ctx):
+    if not await manager_check(ctx):
+        return
+    settings = _ticket_settings(ctx.guild.id)
+    guild = ctx.guild
+    created = []
+    try:
+        category = guild.get_channel(int(settings.get("category_id") or 0))
+        if not isinstance(category, discord.CategoryChannel):
+            category = await guild.create_category("Tickets", reason="Ticket setup")
+            settings["category_id"] = category.id
+            created.append(f"Category: {category.name}")
+        closed = guild.get_channel(int(settings.get("closed_category_id") or 0))
+        if not isinstance(closed, discord.CategoryChannel):
+            closed = await guild.create_category("Closed Tickets", overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=False)}, reason="Ticket setup")
+            settings["closed_category_id"] = closed.id
+            created.append(f"Category: {closed.name}")
+        log = guild.get_channel(int(settings.get("log_channel_id") or 0))
+        if not isinstance(log, discord.TextChannel):
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
+            }
+            for role_id in settings.get("support_role_ids", []):
+                role = guild.get_role(int(role_id))
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True)
+            log = await guild.create_text_channel("ticket-logs", overwrites=overwrites, reason="Ticket setup")
+            settings["log_channel_id"] = log.id
+            created.append(f"Channel: {log.mention}")
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        return await ctx.reply(f"Setup failed. I need Manage Channels. ({str(exc)[:120]})", mention_author=False)
+    save_config()
+    text = ("Created:\n" + "\n".join(created) if created else "Everything was already configured.") + \
+        f"\n\nNext: add support roles with `{ctx.clean_prefix}ticket support add @role`, then post a panel with `{ctx.clean_prefix}ticket panel`."
+    await ctx.reply(embed=feature_embed("Ticket Setup Complete", text), mention_author=False)
+
+
+@ticket_group.command(name="panel")
+@commands.guild_only()
+async def ticket_panel(ctx, channel: discord.TextChannel = None):
+    if not await manager_check(ctx):
+        return
+    channel = channel or ctx.channel
+    settings = _ticket_settings(ctx.guild.id)
+    if not channel.permissions_for(ctx.guild.me).send_messages:
+        return await ctx.reply("I can't send messages in that channel.", mention_author=False)
+    embed = StyledEmbed(title=settings["panel_title"], description=settings["panel_description"])
+    types = settings.get("types", [])
+    view = TicketTypeSelectView(types) if len(types) >= 2 else TicketOpenButtonView(settings.get("button_label"))
+    try:
+        await channel.send(embed=embed, view=view)
+    except discord.HTTPException as exc:
+        return await ctx.reply(f"Could not post the panel: {str(exc)[:150]}", mention_author=False)
+    if channel.id != ctx.channel.id:
+        await ctx.reply(f"Ticket panel posted in {channel.mention}.", mention_author=False)
+
+
+@ticket_group.command(name="config", aliases=["settings"])
+@commands.guild_only()
+async def ticket_config(ctx):
+    if not await manager_check(ctx):
+        return
+    s = _ticket_settings(ctx.guild.id)
+    def chan(value):
+        return f"<#{value}>" if value else "Not set"
+    roles = " ".join(f"<@&{r}>" for r in s["support_role_ids"]) or "None"
+    embed = feature_embed("Ticket Settings", f"Configuration for **{ctx.guild.name}**")
+    embed.add_field(name="Category", value=chan(s["category_id"]), inline=True)
+    embed.add_field(name="Closed category", value=chan(s["closed_category_id"]), inline=True)
+    embed.add_field(name="Log channel", value=chan(s["log_channel_id"]), inline=True)
+    embed.add_field(name="Support roles", value=roles[:1000], inline=False)
+    embed.add_field(name="Max open per user", value=str(s["max_open"]), inline=True)
+    embed.add_field(name="Name format", value=f"`{s['name_format']}`", inline=True)
+    embed.add_field(name="Auto-close", value=f"{s['autoclose_hours']}h" if s["autoclose_hours"] else "Off", inline=True)
+    embed.add_field(name="Types", value=", ".join(t["label"] for t in s["types"]) or "None (single button panel)", inline=False)
+    flags = "\n".join(f"{label}: {'On' if s.get(key, True) else 'Off'}" for key, label in TICKET_TOGGLES.values())
+    embed.add_field(name="Features", value=flags, inline=False)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+async def _ticket_set_category(ctx, key, category):
+    if not await manager_check(ctx):
+        return
+    _ticket_settings(ctx.guild.id)[key] = category.id
+    save_config()
+    await ctx.reply(f"Saved: **{category.name}**.", mention_author=False)
+
+
+@ticket_group.command(name="category")
+@commands.guild_only()
+async def ticket_category(ctx, category: discord.CategoryChannel):
+    await _ticket_set_category(ctx, "category_id", category)
+
+
+@ticket_group.command(name="closedcategory", aliases=["closedcat"])
+@commands.guild_only()
+async def ticket_closed_category(ctx, category: discord.CategoryChannel):
+    await _ticket_set_category(ctx, "closed_category_id", category)
+
+
+@ticket_group.command(name="logs", aliases=["log"])
+@commands.guild_only()
+async def ticket_logs(ctx, channel: discord.TextChannel):
+    if not await manager_check(ctx):
+        return
+    _ticket_settings(ctx.guild.id)["log_channel_id"] = channel.id
+    save_config()
+    await ctx.reply(f"Ticket logs and transcripts will be sent to {channel.mention}.", mention_author=False)
+
+
+@ticket_group.group(name="support", invoke_without_command=True)
+@commands.guild_only()
+async def ticket_support(ctx):
+    await ctx.reply(f"Usage: `{ctx.clean_prefix}ticket support add @role`, `remove @role`, or `list`.", mention_author=False)
+
+
+@ticket_support.command(name="add")
+@commands.guild_only()
+async def ticket_support_add(ctx, role: discord.Role):
+    if not await manager_check(ctx):
+        return
+    if role.is_default():
+        return await ctx.reply("The @everyone role cannot be a support role.", mention_author=False)
+    ids = _ticket_settings(ctx.guild.id)["support_role_ids"]
+    if role.id in ids:
+        return await ctx.reply("That role is already a support role.", mention_author=False)
+    ids.append(role.id)
+    save_config()
+    await ctx.reply(f"{role.mention} can now manage tickets.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@ticket_support.command(name="remove")
+@commands.guild_only()
+async def ticket_support_remove(ctx, role: discord.Role):
+    if not await manager_check(ctx):
+        return
+    ids = _ticket_settings(ctx.guild.id)["support_role_ids"]
+    if role.id not in ids:
+        return await ctx.reply("That role is not a support role.", mention_author=False)
+    ids.remove(role.id)
+    save_config()
+    await ctx.reply(f"{role.mention} removed from support roles.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@ticket_support.command(name="list")
+@commands.guild_only()
+async def ticket_support_list(ctx):
+    if not await manager_check(ctx):
+        return
+    ids = _ticket_settings(ctx.guild.id)["support_role_ids"]
+    text = "\n".join(f"<@&{r}>" for r in ids) or "No support roles set. Admins can always manage tickets."
+    await ctx.reply(embed=feature_embed("Ticket Support Roles", text), mention_author=False)
+
+
+@ticket_group.group(name="type", aliases=["types"], invoke_without_command=True)
+@commands.guild_only()
+async def ticket_type(ctx):
+    await ctx.reply(f"Usage: `{ctx.clean_prefix}ticket type add <label> | [description] | [emoji]`, `remove <label>`, or `list`.", mention_author=False)
+
+
+@ticket_type.command(name="add")
+@commands.guild_only()
+async def ticket_type_add(ctx, *, spec: str):
+    if not await manager_check(ctx):
+        return
+    parts = [part.strip() for part in spec.split("|")]
+    label = parts[0][:100]
+    description = parts[1][:100] if len(parts) > 1 and parts[1] else None
+    emoji = parts[2] if len(parts) > 2 and parts[2] else None
+    if not label:
+        return await ctx.reply("Provide a label.", mention_author=False)
+    if emoji and not (re.fullmatch(r"<a?:\w+:\d+>", emoji) or (len(emoji) <= 8 and not emoji.isascii())):
+        return await ctx.reply("That emoji is not valid. Use a standard emoji or a custom emoji from a server I share.", mention_author=False)
+    settings = _ticket_settings(ctx.guild.id)
+    if len(settings["types"]) >= 25:
+        return await ctx.reply("You can have at most 25 ticket types.", mention_author=False)
+    if _ticket_find_type(settings, label):
+        return await ctx.reply("A type with that label already exists.", mention_author=False)
+    settings["types"].append({"label": label, "description": description, "emoji": emoji})
+    save_config()
+    note = "" if len(settings["types"]) >= 2 else " Add at least two types for the dropdown panel; with one type the panel uses a button."
+    await ctx.reply(f"Added ticket type **{label}**. Re-post the panel with `{ctx.clean_prefix}ticket panel` to apply.{note}", mention_author=False)
+
+
+@ticket_type.command(name="remove")
+@commands.guild_only()
+async def ticket_type_remove(ctx, *, label: str):
+    if not await manager_check(ctx):
+        return
+    settings = _ticket_settings(ctx.guild.id)
+    item = _ticket_find_type(settings, label)
+    if not item:
+        return await ctx.reply("No ticket type with that label.", mention_author=False)
+    settings["types"].remove(item)
+    save_config()
+    await ctx.reply(f"Removed ticket type **{item['label']}**.", mention_author=False)
+
+
+@ticket_type.command(name="list")
+@commands.guild_only()
+async def ticket_type_list(ctx):
+    if not await manager_check(ctx):
+        return
+    types = _ticket_settings(ctx.guild.id)["types"]
+    text = "\n".join(f"`{i}.` {t.get('emoji') or ''} **{t['label']}** {('— ' + t['description']) if t.get('description') else ''}" for i, t in enumerate(types, 1)) or "No types configured."
+    await ctx.reply(embed=feature_embed("Ticket Types", text), mention_author=False)
+
+
+@ticket_group.command(name="max")
+@commands.guild_only()
+async def ticket_max(ctx, amount: int):
+    if not await manager_check(ctx):
+        return
+    if not 1 <= amount <= 10:
+        return await ctx.reply("Choose a number from 1 to 10.", mention_author=False)
+    _ticket_settings(ctx.guild.id)["max_open"] = amount
+    save_config()
+    await ctx.reply(f"Users can now have up to **{amount}** open ticket(s).", mention_author=False)
+
+
+@ticket_group.command(name="format")
+@commands.guild_only()
+async def ticket_format(ctx, *, text: str):
+    if not await manager_check(ctx):
+        return
+    if "{number}" not in text:
+        return await ctx.reply("Include `{number}` in the format so channel names stay unique.", mention_author=False)
+    _ticket_settings(ctx.guild.id)["name_format"] = text[:60]
+    save_config()
+    await ctx.reply(f"Channel name format set to `{text[:60]}`.", mention_author=False)
+
+
+@ticket_group.command(name="welcome")
+@commands.guild_only()
+async def ticket_welcome(ctx, *, text: str):
+    if not await manager_check(ctx):
+        return
+    _ticket_settings(ctx.guild.id)["welcome"] = text[:1500]
+    save_config()
+    await ctx.reply("Welcome message updated.", mention_author=False)
+
+
+@ticket_group.command(name="panelset")
+@commands.guild_only()
+async def ticket_panelset(ctx, field: str, *, text: str):
+    if not await manager_check(ctx):
+        return
+    mapping = {"title": ("panel_title", 200), "description": ("panel_description", 2000), "button": ("button_label", 80)}
+    if field.lower() not in mapping:
+        return await ctx.reply("Field must be `title`, `description`, or `button`.", mention_author=False)
+    key, limit = mapping[field.lower()]
+    _ticket_settings(ctx.guild.id)[key] = text[:limit]
+    save_config()
+    await ctx.reply(f"Panel {field.lower()} updated. Post a new panel to see it.", mention_author=False)
+
+
+@ticket_group.command(name="toggle")
+@commands.guild_only()
+async def ticket_toggle(ctx, feature: str):
+    if not await manager_check(ctx):
+        return
+    item = TICKET_TOGGLES.get(feature.lower())
+    if not item:
+        return await ctx.reply("Choose one of: " + ", ".join(f"`{k}`" for k in TICKET_TOGGLES) + ".", mention_author=False)
+    key, label = item
+    settings = _ticket_settings(ctx.guild.id)
+    settings[key] = not settings.get(key, True)
+    save_config()
+    await ctx.reply(f"{label}: **{'On' if settings[key] else 'Off'}**.", mention_author=False)
+
+
+@ticket_group.command(name="autoclose")
+@commands.guild_only()
+async def ticket_autoclose(ctx, hours: str):
+    if not await manager_check(ctx):
+        return
+    if hours.lower() in {"off", "0", "disable", "none"}:
+        value = 0
+    elif hours.isdigit() and 1 <= int(hours) <= 720:
+        value = int(hours)
+    else:
+        return await ctx.reply("Use a number of hours from 1 to 720, or `off`.", mention_author=False)
+    _ticket_settings(ctx.guild.id)["autoclose_hours"] = value
+    save_config()
+    await ctx.reply(f"Auto-close {'disabled' if not value else f'set to {value}h of inactivity'}.", mention_author=False)
+
+
+@ticket_group.group(name="blacklist", invoke_without_command=True)
+@commands.guild_only()
+async def ticket_blacklist(ctx):
+    await ctx.reply(f"Usage: `{ctx.clean_prefix}ticket blacklist add @user`, `remove @user`, or `list`.", mention_author=False)
+
+
+@ticket_blacklist.command(name="add")
+@commands.guild_only()
+async def ticket_blacklist_add(ctx, member: discord.Member):
+    if not await manager_check(ctx):
+        return
+    ids = _ticket_settings(ctx.guild.id)["blacklist"]
+    if member.id in ids:
+        return await ctx.reply("That user is already blocked.", mention_author=False)
+    ids.append(member.id)
+    save_config()
+    await ctx.reply(f"{member.mention} can no longer open tickets.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@ticket_blacklist.command(name="remove")
+@commands.guild_only()
+async def ticket_blacklist_remove(ctx, member: discord.Member):
+    if not await manager_check(ctx):
+        return
+    ids = _ticket_settings(ctx.guild.id)["blacklist"]
+    if member.id not in ids:
+        return await ctx.reply("That user is not blocked.", mention_author=False)
+    ids.remove(member.id)
+    save_config()
+    await ctx.reply(f"{member.mention} can open tickets again.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@ticket_blacklist.command(name="list")
+@commands.guild_only()
+async def ticket_blacklist_list(ctx):
+    if not await manager_check(ctx):
+        return
+    ids = _ticket_settings(ctx.guild.id)["blacklist"]
+    await ctx.reply(embed=feature_embed("Ticket Blacklist", "\n".join(f"<@{i}> (`{i}`)" for i in ids) or "Nobody is blocked."), mention_author=False)
+
+
+@ticket_group.command(name="stats")
+@commands.guild_only()
+async def ticket_stats(ctx):
+    if not await manager_check(ctx):
+        return
+    s = _ticket_settings(ctx.guild.id)
+    open_now = sum(1 for r in _ticket_records().values() if r.get("guild_id") == ctx.guild.id and r.get("status") == "open")
+    rating = f"{s['rating_total'] / s['rating_count']:.2f}/5 ({s['rating_count']} ratings)" if s["rating_count"] else "No ratings yet"
+    embed = feature_embed("Ticket Statistics", f"Stats for **{ctx.guild.name}**")
+    embed.add_field(name="Opened", value=str(s["opened_total"]), inline=True)
+    embed.add_field(name="Closed", value=str(s["closed_total"]), inline=True)
+    embed.add_field(name="Open now", value=str(open_now), inline=True)
+    embed.add_field(name="Average rating", value=rating, inline=False)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+# ----- in-ticket commands -----
+@bot.command(name="close")
+@commands.guild_only()
+async def ticket_close_command(ctx, *, reason: str = None):
+    try:
+        await ticket_close(ctx.channel, ctx.author, reason)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="close")
+@commands.guild_only()
+async def ticket_close_sub(ctx, *, reason: str = None):
+    await ticket_close_command.callback(ctx, reason=reason)
+
+
+@bot.command(name="claim")
+@commands.guild_only()
+async def ticket_claim_command(ctx):
+    try:
+        await ctx.reply(embed=await ticket_claim(ctx.channel, ctx.author), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@bot.command(name="unclaim")
+@commands.guild_only()
+async def ticket_unclaim_command(ctx):
+    try:
+        await ctx.reply(embed=await ticket_claim(ctx.channel, ctx.author, unclaim=True), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="claim")
+@commands.guild_only()
+async def ticket_claim_sub(ctx):
+    await ticket_claim_command.callback(ctx)
+
+
+@ticket_group.command(name="unclaim")
+@commands.guild_only()
+async def ticket_unclaim_sub(ctx):
+    await ticket_unclaim_command.callback(ctx)
+
+
+@ticket_group.command(name="transfer")
+@commands.guild_only()
+async def ticket_transfer(ctx, member: discord.Member):
+    try:
+        await ctx.reply(embed=await ticket_claim(ctx.channel, ctx.author, target=member), mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none())
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="add")
+@commands.guild_only()
+async def ticket_add(ctx, member: discord.Member):
+    try:
+        await ctx.reply(embed=await ticket_add_user(ctx.channel, ctx.author, member), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="remove")
+@commands.guild_only()
+async def ticket_remove(ctx, member: discord.Member):
+    try:
+        await ctx.reply(embed=await ticket_remove_user(ctx.channel, ctx.author, member), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="rename")
+@commands.guild_only()
+async def ticket_rename_command(ctx, *, name: str):
+    try:
+        await ctx.reply(embed=await ticket_rename(ctx.channel, ctx.author, name), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="priority")
+@commands.guild_only()
+async def ticket_priority(ctx, level: str):
+    try:
+        await ctx.reply(embed=await ticket_set_priority(ctx.channel, ctx.author, level), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="transcript")
+@commands.guild_only()
+async def ticket_transcript_command(ctx):
+    try:
+        record, _ = _ticket_require(ctx.channel, ctx.author, staff=True)
+    except TicketError as exc:
+        return await _ticket_reply_error(ctx, exc)
+    async with ctx.typing():
+        data = await _ticket_build_transcript(ctx.channel, record)
+    await ctx.reply(file=_ticket_transcript_file(data, record), mention_author=False)
+
+
+@ticket_group.command(name="reopen")
+@commands.guild_only()
+async def ticket_reopen_command(ctx):
+    try:
+        await ctx.reply(embed=await ticket_reopen(ctx.channel, ctx.author), mention_author=False)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="delete")
+@commands.guild_only()
+async def ticket_delete_command(ctx):
+    try:
+        await ticket_delete(ctx.channel, ctx.author)
+    except TicketError as exc:
+        await _ticket_reply_error(ctx, exc)
+
+
+@ticket_group.command(name="info")
+@commands.guild_only()
+async def ticket_info(ctx):
+    record = _ticket_record(ctx.channel.id)
+    if record is None:
+        return await _ticket_channel_arg_error(ctx)
+    embed = _ticket_embed(ctx.guild, record)
+    embed.add_field(name="Status", value=str(record.get("status", "open")).title(), inline=True)
+    try:
+        opened = datetime.fromisoformat(record["opened_at"])
+        embed.add_field(name="Opened", value=discord.utils.format_dt(opened, "R"), inline=True)
+    except (KeyError, TypeError, ValueError):
+        pass
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+# ---------------------------------------------------------------------------
+# AUTORESPONDER (Mimu-style: match modes, variables, cooldowns, channel limits, reply/embed/delete options)
+# ---------------------------------------------------------------------------
+AR_MODES = ("exact", "contains", "word", "starts", "ends", "wildcard")
+AR_MAX_PER_GUILD = 100
+AR_COOLDOWNS = {}
+
+
+def _ar_entries(guild_id, create=False):
+    root = config.setdefault("autoresponders", {})
+    if not isinstance(root, dict):
+        root = {}
+        config["autoresponders"] = root
+    if create:
+        return root.setdefault(str(guild_id), [])
+    return root.get(str(guild_id), [])
+
+
+def _ar_find(guild_id, ident):
+    entries = _ar_entries(guild_id)
+    ident = str(ident).strip()
+    if ident.isdigit():
+        for entry in entries:
+            if entry["id"] == int(ident):
+                return entry
+    lowered = ident.lower()
+    for entry in entries:
+        if entry["trigger"].lower() == lowered:
+            return entry
+    return None
+
+
+def _ar_validate(trigger, response, mode):
+    if not trigger.strip():
+        return "The trigger cannot be empty."
+    if len(trigger) > 200:
+        return "The trigger can be at most 200 characters."
+    if not response.strip():
+        return "The response cannot be empty."
+    if len(response) > 1800:
+        return "The response can be at most 1,800 characters."
+    if mode not in AR_MODES:
+        return "Mode must be one of: " + ", ".join(AR_MODES) + "."
+    if mode == "wildcard" and trigger.count("*") > 5:
+        return "Wildcard triggers can contain at most 5 `*` characters."
+    return None
+
+
+def _ar_add(guild_id, user_id, trigger, response, mode):
+    entries = _ar_entries(guild_id, create=True)
+    entry = {
+        "id": max((e["id"] for e in entries), default=0) + 1,
+        "trigger": trigger.strip(),
+        "response": response.strip(),
+        "mode": mode,
+        "enabled": True,
+        "ignore_case": True,
+        "cooldown": 5,
+        "reply": True,
+        "embed": False,
+        "delete_trigger": False,
+        "channels": [],
+        "uses": 0,
+        "created_by": user_id,
+    }
+    entries.append(entry)
+    save_config()
+    return entry
+
+
+def _ar_matches(entry, content):
+    trigger = entry["trigger"]
+    text = (content or "").strip()
+    if entry.get("ignore_case", True):
+        trigger = trigger.lower()
+        text = text.lower()
+    mode = entry.get("mode", "exact")
+    if mode == "exact":
+        return text == trigger
+    if mode == "contains":
+        return trigger in text
+    if mode == "word":
+        return re.search(r"(?<!\w)" + re.escape(trigger) + r"(?!\w)", text) is not None
+    if mode == "starts":
+        return text.startswith(trigger)
+    if mode == "ends":
+        return text.endswith(trigger)
+    if mode == "wildcard":
+        pattern = ".*".join(re.escape(part) for part in trigger.split("*"))
+        return re.fullmatch(pattern, text, re.DOTALL) is not None
+    return False
+
+
+def _ar_render(template, message):
+    guild = message.guild
+    author = message.author
+    values = {
+        "{user}": author.display_name,
+        "{user.name}": author.name,
+        "{user.mention}": author.mention,
+        "{user.id}": str(author.id),
+        "{server}": guild.name,
+        "{server.name}": guild.name,
+        "{membercount}": str(guild.member_count or len(guild.members)),
+        "{server.members}": str(guild.member_count or len(guild.members)),
+        "{channel}": f"#{message.channel.name}" if hasattr(message.channel, "name") else "this channel",
+        "{channel.mention}": getattr(message.channel, "mention", "this channel"),
+    }
+    text = template
+    for key, value in values.items():
+        text = text.replace(key, value)
+
+    def _random(match):
+        low, high = int(match.group(1)), int(match.group(2))
+        if low > high:
+            low, high = high, low
+        return str(random.randint(low, high))
+
+    def _choose(match):
+        options = [option.strip() for option in match.group(1).split("|") if option.strip()]
+        return random.choice(options) if options else ""
+
+    text = re.sub(r"\{random:(-?\d{1,9})-(-?\d{1,9})\}", _random, text)
+    text = re.sub(r"\{choose:([^{}]+)\}", _choose, text)
+    return text[:2000]
+
+
+AR_VARIABLES_HELP = (
+    "`{user}` `{user.name}` `{user.mention}` `{user.id}` `{server}` `{membercount}` "
+    "`{channel}` `{channel.mention}` `{random:1-100}` `{choose:a|b|c}`"
+)
+
+
+@bot.listen("on_message")
+async def kanade_autoresponder_listener(message):
+    if message.author.bot or message.guild is None or not message.content:
+        return
+    entries = _ar_entries(message.guild.id)
+    if not entries:
+        return
+    enabled = [entry for entry in entries if entry.get("enabled", True)]
+    if not enabled:
+        return
+    # Never answer a message that is actually a bot command.
+    try:
+        ctx = await bot.get_context(message)
+    except Exception:
+        return
+    if ctx.valid:
+        return
+    me = message.guild.me
+    if me is None or not message.channel.permissions_for(me).send_messages:
+        return
+    now = time.monotonic()
+    for entry in enabled:
+        channels = entry.get("channels") or []
+        if channels and message.channel.id not in channels:
+            continue
+        if not _ar_matches(entry, message.content):
+            continue
+        key = (message.guild.id, entry["id"], message.channel.id)
+        if now - AR_COOLDOWNS.get(key, -1e9) < float(entry.get("cooldown", 5)):
+            return
+        AR_COOLDOWNS[key] = now
+        if len(AR_COOLDOWNS) > 5000:
+            for stale in [k for k, t in AR_COOLDOWNS.items() if now - t > 3600]:
+                AR_COOLDOWNS.pop(stale, None)
+        text = _ar_render(entry["response"], message)
+        entry["uses"] = int(entry.get("uses", 0)) + 1
+        allowed = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=False)
+        try:
+            if entry.get("embed", False):
+                embed = StyledEmbed(description=text)
+                if entry.get("reply", True):
+                    await message.reply(embed=embed, mention_author=False, allowed_mentions=allowed)
+                else:
+                    await message.channel.send(embed=embed, allowed_mentions=allowed)
+            elif entry.get("reply", True):
+                await message.reply(text, mention_author=False, allowed_mentions=allowed)
+            else:
+                await message.channel.send(text, allowed_mentions=allowed)
+            if entry.get("delete_trigger", False) and message.channel.permissions_for(me).manage_messages:
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+        except discord.HTTPException:
+            logger.warning("Autoresponder %s could not send in guild %s", entry["id"], message.guild.id)
+        return
+
+
+def _ar_summary(entry):
+    flags = []
+    flags.append("on" if entry.get("enabled", True) else "off")
+    flags.append(entry.get("mode", "exact"))
+    return f"`#{entry['id']}` `{entry['trigger'][:40]}` ({', '.join(flags)}) — {entry['response'][:60].replace(chr(10), ' ')}"
+
+
+@bot.group(name="autoresponder", aliases=["ar", "autoreply"], invoke_without_command=True)
+@commands.guild_only()
+async def autoresponder_group(ctx):
+    p = ctx.clean_prefix
+    description = (
+        f"`{p}ar add [mode] <trigger> | <response>` — Create an autoresponder (e.g. `{p}ar add [contains] hello | Hi {{user}}!`)\n"
+        f"`{p}ar remove <id|trigger>` — Delete one\n"
+        f"`{p}ar edit <id> <new response>` — Change the response\n"
+        f"`{p}ar list` / `{p}ar info <id>` — View autoresponders\n"
+        f"`{p}ar toggle <id>` — Enable or disable one\n"
+        f"`{p}ar mode <id> <{'|'.join(AR_MODES)}>` — Change how the trigger matches\n"
+        f"`{p}ar cooldown <id> <seconds>` — Per-channel cooldown (0-3600)\n"
+        f"`{p}ar reply <id> on|off` — Reply to the message or send normally\n"
+        f"`{p}ar embed <id> on|off` — Send the response as an embed\n"
+        f"`{p}ar deletetrigger <id> on|off` — Delete the triggering message\n"
+        f"`{p}ar case <id> on|off` — Case-insensitive matching\n"
+        f"`{p}ar channels <id> add|remove|clear [#channel]` — Limit to channels\n"
+        f"`{p}ar clear` — Remove every autoresponder\n\n"
+        f"**Variables:** {AR_VARIABLES_HELP}\n"
+        f"**Modes:** {', '.join(f'`{m}`' for m in AR_MODES)}"
+    )
+    await ctx.reply(embed=feature_embed("Autoresponder", description), mention_author=False)
+
+
+@autoresponder_group.command(name="add", aliases=["create"])
+@commands.guild_only()
+async def autoresponder_add(ctx, *, spec: str):
+    if not await manager_check(ctx):
+        return
+    mode = "exact"
+    match = re.match(r"^\[(" + "|".join(AR_MODES) + r")\]\s*", spec, re.IGNORECASE)
+    if match:
+        mode = match.group(1).lower()
+        spec = spec[match.end():]
+    if "|" not in spec:
+        return await ctx.reply(f"Use `{ctx.clean_prefix}ar add [mode] <trigger> | <response>`.", mention_author=False)
+    trigger, response = (part.strip() for part in spec.split("|", 1))
+    error = _ar_validate(trigger, response, mode)
+    if error:
+        return await ctx.reply(error, mention_author=False)
+    if len(_ar_entries(ctx.guild.id)) >= AR_MAX_PER_GUILD:
+        return await ctx.reply(f"This server reached the limit of {AR_MAX_PER_GUILD} autoresponders.", mention_author=False)
+    if any(e["trigger"].lower() == trigger.lower() and e.get("mode") == mode for e in _ar_entries(ctx.guild.id)):
+        return await ctx.reply("An autoresponder with that trigger and mode already exists.", mention_author=False)
+    entry = _ar_add(ctx.guild.id, ctx.author.id, trigger, response, mode)
+    await ctx.reply(embed=feature_embed("Autoresponder Created", f"ID `{entry['id']}` — `{mode}` match on `{trigger[:100]}`."), mention_author=False)
+
+
+@autoresponder_group.command(name="remove", aliases=["delete", "del"])
+@commands.guild_only()
+async def autoresponder_remove(ctx, *, ident: str):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    _ar_entries(ctx.guild.id).remove(entry)
+    save_config()
+    await ctx.reply(f"Autoresponder `#{entry['id']}` deleted.", mention_author=False)
+
+
+@autoresponder_group.command(name="edit")
+@commands.guild_only()
+async def autoresponder_edit(ctx, ident: str, *, response: str):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    error = _ar_validate(entry["trigger"], response, entry.get("mode", "exact"))
+    if error:
+        return await ctx.reply(error, mention_author=False)
+    entry["response"] = response.strip()
+    save_config()
+    await ctx.reply(f"Autoresponder `#{entry['id']}` updated.", mention_author=False)
+
+
+@autoresponder_group.command(name="list")
+@commands.guild_only()
+async def autoresponder_list(ctx):
+    if not await manager_check(ctx):
+        return
+    entries = _ar_entries(ctx.guild.id)
+    if not entries:
+        return await ctx.reply(embed=feature_embed("Autoresponders", "No autoresponders yet. Create one with the `add` subcommand."), mention_author=False)
+    text = "\n".join(_ar_summary(e) for e in entries)
+    if len(text) > 3900:
+        text = text[:3850].rsplit("\n", 1)[0] + "\n\nList shortened due to Discord's embed limit."
+    embed = feature_embed("Autoresponders", text)
+    embed.set_footer(text=f"{len(entries)} / {AR_MAX_PER_GUILD} used")
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+@autoresponder_group.command(name="info", aliases=["view"])
+@commands.guild_only()
+async def autoresponder_info(ctx, *, ident: str):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    embed = feature_embed(f"Autoresponder #{entry['id']}", "")
+    embed.add_field(name="Trigger", value=f"`{entry['trigger'][:200]}`", inline=False)
+    embed.add_field(name="Response", value=entry["response"][:1000], inline=False)
+    embed.add_field(name="Mode", value=entry.get("mode", "exact"), inline=True)
+    embed.add_field(name="Enabled", value="Yes" if entry.get("enabled", True) else "No", inline=True)
+    embed.add_field(name="Cooldown", value=f"{entry.get('cooldown', 5)}s", inline=True)
+    embed.add_field(name="Reply", value="On" if entry.get("reply", True) else "Off", inline=True)
+    embed.add_field(name="Embed", value="On" if entry.get("embed") else "Off", inline=True)
+    embed.add_field(name="Delete trigger", value="On" if entry.get("delete_trigger") else "Off", inline=True)
+    embed.add_field(name="Ignore case", value="On" if entry.get("ignore_case", True) else "Off", inline=True)
+    embed.add_field(name="Channels", value=" ".join(f"<#{c}>" for c in entry.get("channels", [])) or "All channels", inline=False)
+    embed.add_field(name="Uses", value=str(entry.get("uses", 0)), inline=True)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+@autoresponder_group.command(name="toggle")
+@commands.guild_only()
+async def autoresponder_toggle(ctx, *, ident: str):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    entry["enabled"] = not entry.get("enabled", True)
+    save_config()
+    await ctx.reply(f"Autoresponder `#{entry['id']}` is now **{'enabled' if entry['enabled'] else 'disabled'}**.", mention_author=False)
+
+
+@autoresponder_group.command(name="mode")
+@commands.guild_only()
+async def autoresponder_mode(ctx, ident: str, mode: str):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    mode = mode.lower()
+    error = _ar_validate(entry["trigger"], entry["response"], mode)
+    if error:
+        return await ctx.reply(error, mention_author=False)
+    entry["mode"] = mode
+    save_config()
+    await ctx.reply(f"Autoresponder `#{entry['id']}` now matches using `{mode}`.", mention_author=False)
+
+
+@autoresponder_group.command(name="cooldown")
+@commands.guild_only()
+async def autoresponder_cooldown(ctx, ident: str, seconds: int):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    if not 0 <= seconds <= 3600:
+        return await ctx.reply("Cooldown must be between 0 and 3600 seconds.", mention_author=False)
+    entry["cooldown"] = seconds
+    save_config()
+    await ctx.reply(f"Cooldown for `#{entry['id']}` set to **{seconds}s**.", mention_author=False)
+
+
+async def _ar_set_flag(ctx, ident, key, value, label):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    state = value.lower() in {"on", "true", "yes", "enable", "enabled", "1"}
+    if value.lower() not in {"on", "off", "true", "false", "yes", "no", "enable", "enabled", "disable", "disabled", "1", "0"}:
+        return await ctx.reply("Use `on` or `off`.", mention_author=False)
+    entry[key] = state
+    save_config()
+    await ctx.reply(f"{label} for `#{entry['id']}`: **{'On' if state else 'Off'}**.", mention_author=False)
+
+
+@autoresponder_group.command(name="reply")
+@commands.guild_only()
+async def autoresponder_reply(ctx, ident: str, value: str):
+    await _ar_set_flag(ctx, ident, "reply", value, "Reply mode")
+
+
+@autoresponder_group.command(name="embed")
+@commands.guild_only()
+async def autoresponder_embed(ctx, ident: str, value: str):
+    await _ar_set_flag(ctx, ident, "embed", value, "Embed mode")
+
+
+@autoresponder_group.command(name="deletetrigger", aliases=["deletemsg"])
+@commands.guild_only()
+async def autoresponder_deletetrigger(ctx, ident: str, value: str):
+    await _ar_set_flag(ctx, ident, "delete_trigger", value, "Delete trigger")
+
+
+@autoresponder_group.command(name="case")
+@commands.guild_only()
+async def autoresponder_case(ctx, ident: str, value: str):
+    # "on" means case-INsensitive matching.
+    await _ar_set_flag(ctx, ident, "ignore_case", value, "Ignore case")
+
+
+@autoresponder_group.command(name="channels", aliases=["channel"])
+@commands.guild_only()
+async def autoresponder_channels(ctx, ident: str, action: str, channel: discord.TextChannel = None):
+    if not await manager_check(ctx):
+        return
+    entry = _ar_find(ctx.guild.id, ident)
+    if entry is None:
+        return await ctx.reply("No autoresponder matches that ID or trigger.", mention_author=False)
+    channels = entry.setdefault("channels", [])
+    action = action.lower()
+    if action == "clear":
+        channels.clear()
+    elif action in {"add", "remove"} and channel is not None:
+        if action == "add" and channel.id not in channels:
+            channels.append(channel.id)
+        elif action == "remove" and channel.id in channels:
+            channels.remove(channel.id)
+    else:
+        return await ctx.reply("Use `add #channel`, `remove #channel`, or `clear`.", mention_author=False)
+    save_config()
+    shown = " ".join(f"<#{c}>" for c in channels) or "all channels"
+    await ctx.reply(f"Autoresponder `#{entry['id']}` runs in: {shown}.", mention_author=False)
+
+
+@autoresponder_group.command(name="clear", aliases=["reset"])
+@commands.guild_only()
+async def autoresponder_clear(ctx):
+    if not await manager_check(ctx):
+        return
+    entries = _ar_entries(ctx.guild.id)
+    count = len(entries)
+    if not count:
+        return await ctx.reply("There are no autoresponders to clear.", mention_author=False)
+    config.get("autoresponders", {}).pop(str(ctx.guild.id), None)
+    save_config()
+    await ctx.reply(f"Removed **{count}** autoresponder(s).", mention_author=False)
+
+
+# ----- slash commands (Mimu-style /autoresponder) -----
+autoresponder_slash = app_commands.Group(name="autoresponder", description="Manage autoresponders", guild_only=True)
+
+
+def _slash_ar_denied(interaction):
+    return interaction.guild is None or not has_admin_access(interaction.user)
+
+
+@autoresponder_slash.command(name="add", description="Create an autoresponder")
+@app_commands.describe(trigger="Text that triggers the response", response="What Kanade should say", mode="How the trigger is matched")
+@app_commands.choices(mode=[app_commands.Choice(name=m, value=m) for m in AR_MODES])
+async def slash_ar_add(interaction: discord.Interaction, trigger: str, response: str, mode: app_commands.Choice[str] = None):
+    if _slash_ar_denied(interaction):
+        return await interaction.response.send_message("Administrator access required.", ephemeral=True)
+    mode_value = mode.value if mode else "exact"
+    error = _ar_validate(trigger, response, mode_value)
+    if error:
+        return await interaction.response.send_message(error, ephemeral=True)
+    if len(_ar_entries(interaction.guild.id)) >= AR_MAX_PER_GUILD:
+        return await interaction.response.send_message(f"This server reached the limit of {AR_MAX_PER_GUILD} autoresponders.", ephemeral=True)
+    entry = _ar_add(interaction.guild.id, interaction.user.id, trigger, response, mode_value)
+    await interaction.response.send_message(f"Autoresponder `#{entry['id']}` created ({mode_value} match).", ephemeral=True)
+
+
+@autoresponder_slash.command(name="remove", description="Delete an autoresponder by ID or trigger")
+async def slash_ar_remove(interaction: discord.Interaction, ident: str):
+    if _slash_ar_denied(interaction):
+        return await interaction.response.send_message("Administrator access required.", ephemeral=True)
+    entry = _ar_find(interaction.guild.id, ident)
+    if entry is None:
+        return await interaction.response.send_message("No autoresponder matches that ID or trigger.", ephemeral=True)
+    _ar_entries(interaction.guild.id).remove(entry)
+    save_config()
+    await interaction.response.send_message(f"Autoresponder `#{entry['id']}` deleted.", ephemeral=True)
+
+
+@autoresponder_slash.command(name="list", description="List this server's autoresponders")
+async def slash_ar_list(interaction: discord.Interaction):
+    if _slash_ar_denied(interaction):
+        return await interaction.response.send_message("Administrator access required.", ephemeral=True)
+    entries = _ar_entries(interaction.guild.id)
+    text = "\n".join(_ar_summary(e) for e in entries) or "No autoresponders yet."
+    if len(text) > 3900:
+        text = text[:3850].rsplit("\n", 1)[0] + "\n\nList shortened due to Discord's embed limit."
+    await interaction.response.send_message(embed=feature_embed("Autoresponders", text), ephemeral=True)
+
+
+@autoresponder_slash.command(name="toggle", description="Enable or disable an autoresponder")
+async def slash_ar_toggle(interaction: discord.Interaction, ident: str):
+    if _slash_ar_denied(interaction):
+        return await interaction.response.send_message("Administrator access required.", ephemeral=True)
+    entry = _ar_find(interaction.guild.id, ident)
+    if entry is None:
+        return await interaction.response.send_message("No autoresponder matches that ID or trigger.", ephemeral=True)
+    entry["enabled"] = not entry.get("enabled", True)
+    save_config()
+    await interaction.response.send_message(f"Autoresponder `#{entry['id']}` is now {'enabled' if entry['enabled'] else 'disabled'}.", ephemeral=True)
+
+
+bot.tree.add_command(autoresponder_slash)
+
+
+# ---------------------------------------------------------------------------
+# MUSIC (Jockie-style: play/search, queue, loop, shuffle, seek, filters, vote-skip, DJ role, autoplay, 24/7, controls)
+# Requires: ffmpeg on the host, yt-dlp, PyNaCl (install discord.py[voice]).
+# ---------------------------------------------------------------------------
+MUSIC_PLAYERS = {}
+MUSIC_IDLE_TIMEOUT = 180       # seconds the queue may sit empty before leaving
+MUSIC_ALONE_TIMEOUT = 60       # seconds alone in a channel before leaving
+MUSIC_MAX_QUEUE = 500
+MUSIC_PLAYLIST_LIMIT = 100
+MUSIC_FILTERS = {
+    "off": None,
+    "bassboost": "bass=g=10,dynaudnorm=f=200",
+    "bassboost_low": "bass=g=5,dynaudnorm=f=200",
+    "bassboost_high": "bass=g=16,dynaudnorm=f=200",
+    "nightcore": "aresample=48000,asetrate=60000,aresample=48000",
+    "vaporwave": "aresample=48000,asetrate=38400,aresample=48000",
+    "8d": "apulsator=hz=0.08",
+    "treble": "treble=g=8",
+    "tremolo": "tremolo=f=5.0:d=0.7",
+    "vibrato": "vibrato=f=6.0:d=0.5",
+}
+MUSIC_FILTER_ALIASES = {
+    "bass": "bassboost", "bb": "bassboost", "nc": "nightcore", "slowed": "vaporwave",
+    "reset": "off", "none": "off", "clear": "off", "disable": "off", "8": "8d",
+}
+
+
+class MusicError(Exception):
+    """User-facing music problem."""
+
+
+def _music_settings(guild_id):
+    root = config.setdefault("music_settings", {})
+    if not isinstance(root, dict):
+        root = {}
+        config["music_settings"] = root
+    return root.setdefault(str(guild_id), {})
+
+
+def _fmt_duration(seconds):
+    if seconds is None:
+        return "Live/Unknown"
+    seconds = int(max(0, seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def _parse_timestamp(text):
+    text = (text or "").strip().lower()
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) in (2, 3) and all(part.isdigit() for part in parts):
+            total = 0
+            for part in parts:
+                total = total * 60 + int(part)
+            return total
+        return None
+    match = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", text)
+    if match and any(match.groups()):
+        hours, minutes, secs = (int(g) if g else 0 for g in match.groups())
+        return hours * 3600 + minutes * 60 + secs
+    return None
+
+
+def _md_safe(text, limit=60):
+    text = (text or "Unknown").replace("[", "(").replace("]", ")").replace("`", "'").replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+async def _music_error(ctx, text):
+    await ctx.reply(embed=feature_embed(f"{ERROR_EMOJI} Music Error", text), mention_author=False)
+
+
+class MusicTrack:
+    def __init__(self, *, title, webpage_url, duration=None, thumbnail=None, uploader=None,
+                 requester_id=0, requester_name="Unknown", stream_url=None):
+        self.title = title or "Unknown title"
+        self.webpage_url = webpage_url
+        self.duration = int(duration) if duration else None
+        self.thumbnail = thumbnail
+        self.uploader = uploader
+        self.requester_id = requester_id
+        self.requester_name = requester_name
+        self.stream_url = stream_url
+        self.resolved_at = time.monotonic() if stream_url else 0.0
+
+    async def ensure_stream(self):
+        # Stream URLs expire, so refresh anything older than 20 minutes.
+        if self.stream_url and time.monotonic() - self.resolved_at < 1200:
+            return
+        info = await _ytdl_run(_ytdl_resolve_sync, self.webpage_url)
+        if info.get("entries"):
+            entries = [e for e in info["entries"] if e]
+            if not entries:
+                raise MusicError("Nothing playable was found for that track.")
+            info = entries[0]
+        url = info.get("url")
+        if not url:
+            raise MusicError("Could not find an audio stream for that track.")
+        self.stream_url = url
+        self.resolved_at = time.monotonic()
+        self.duration = self.duration or (int(info["duration"]) if info.get("duration") else None)
+        self.thumbnail = self.thumbnail or info.get("thumbnail")
+
+
+def _ytdl_base_options():
+    options = {
+        "format": "bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "socket_timeout": 15,
+        "retries": 3,
+        "source_address": "0.0.0.0",
+        "ignoreerrors": False,
+    }
+    cookies = os.getenv("YTDLP_COOKIES", "").strip()
+    if cookies and os.path.isfile(cookies):
+        options["cookiefile"] = cookies
+    return options
+
+
+def _ytdl_extract_sync(query, *, flat, noplaylist, limit=None):
+    options = _ytdl_base_options()
+    options["noplaylist"] = noplaylist
+    if flat:
+        options["extract_flat"] = "in_playlist"
+    if limit:
+        options["playlistend"] = limit
+    with yt_dlp.YoutubeDL(options) as ydl:
+        return ydl.extract_info(query, download=False)
+
+
+def _ytdl_resolve_sync(url):
+    return _ytdl_extract_sync(url, flat=False, noplaylist=True)
+
+
+async def _ytdl_run(function, *args, **kwargs):
+    if yt_dlp is None:
+        raise MusicError("Music is unavailable because `yt-dlp` is not installed on the host.")
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(function, *args, **kwargs), timeout=60)
+    except asyncio.TimeoutError:
+        raise MusicError("Timed out while contacting the media source. Try again.")
+    except MusicError:
+        raise
+    except Exception as exc:
+        message = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip().splitlines()
+        raise MusicError((message[-1] if message else "Could not load that media.")[:220])
+
+
+def _music_track_from_info(info, requester, *, resolved=False):
+    if not info:
+        return None
+    url = info.get("webpage_url") or info.get("original_url") or info.get("url")
+    extractor = (info.get("ie_key") or info.get("extractor_key") or info.get("extractor") or "").lower()
+    video_id = info.get("id")
+    if (not url or not str(url).startswith("http")) and video_id and "youtube" in extractor:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url or not str(url).startswith("http"):
+        return None
+    thumbnail = info.get("thumbnail")
+    if not thumbnail and info.get("thumbnails"):
+        thumbnail = info["thumbnails"][-1].get("url")
+    return MusicTrack(
+        title=info.get("title"),
+        webpage_url=url,
+        duration=info.get("duration"),
+        thumbnail=thumbnail,
+        uploader=info.get("uploader") or info.get("channel"),
+        requester_id=getattr(requester, "id", 0),
+        requester_name=getattr(requester, "display_name", str(requester)),
+        stream_url=info.get("url") if resolved and info.get("url") != url else None,
+    )
+
+
+async def music_resolve(query, requester):
+    """Return (tracks, playlist_title) for a URL, playlist URL or search phrase."""
+    query = (query or "").strip().strip("<>")
+    if not query:
+        raise MusicError("Provide a song name or link.")
+    if re.match(r"^https?://", query, re.IGNORECASE):
+        parsed = urlparse(query)
+        host = parsed.netloc.lower()
+        if "spotify.com" in host:
+            raise MusicError("Spotify links are not supported. Search by the song name instead.")
+        path = parsed.path.lower()
+        is_playlist = any(marker in path for marker in ("/playlist", "/sets/", "/album", "/albums/"))
+        if is_playlist:
+            info = await _ytdl_run(_ytdl_extract_sync, query, flat=True, noplaylist=False, limit=MUSIC_PLAYLIST_LIMIT)
+            entries = [e for e in (info.get("entries") or []) if e]
+            tracks = [t for t in (_music_track_from_info(e, requester) for e in entries) if t]
+            if not tracks:
+                raise MusicError("That playlist is empty or private.")
+            return tracks, info.get("title")
+        info = await _ytdl_run(_ytdl_resolve_sync, query)
+        if info.get("entries"):
+            info = next((e for e in info["entries"] if e), None)
+        track = _music_track_from_info(info, requester, resolved=True)
+        if track is None:
+            raise MusicError("Could not read that link.")
+        return [track], None
+    tracks = await music_search(query, requester, 1)
+    return tracks[:1], None
+
+
+async def music_search(query, requester, count=5):
+    last_error = None
+    for prefix in ("ytsearch", "scsearch"):
+        try:
+            info = await _ytdl_run(_ytdl_extract_sync, f"{prefix}{count}:{query}", flat=True, noplaylist=True)
+        except MusicError as exc:
+            last_error = exc
+            continue
+        tracks = [t for t in (_music_track_from_info(e, requester) for e in (info.get("entries") or []) if e) if t]
+        if tracks:
+            return tracks
+    if last_error:
+        raise last_error
+    raise MusicError("No results found.")
+
+
+class MusicPlayer:
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        settings = _music_settings(guild_id)
+        self.queue = deque()
+        self.history = deque(maxlen=50)
+        self.current = None
+        self.loop_mode = "off"          # off | track | queue
+        self.autoplay = False
+        self.filter_name = "off"
+        self.volume = int(settings.get("volume", 100))
+        self.stay_247 = bool(settings.get("stay_247", False))
+        self.text_channel_id = None
+        self.queue_event = asyncio.Event()
+        self.task = None
+        self.alone_task = None
+        self.skip_votes = set()
+        self.now_message = None
+        self._skip_requested = False
+        self._seek_to = None
+        self._started = 0.0
+        self._offset = 0.0
+        self._paused_at = None
+        self._paused_total = 0.0
+
+    # ----- helpers -----
+    @property
+    def guild(self):
+        return bot.get_guild(self.guild_id)
+
+    @property
+    def voice(self):
+        guild = self.guild
+        return guild.voice_client if guild else None
+
+    @property
+    def position(self):
+        if self.current is None:
+            return 0.0
+        reference = self._paused_at or time.monotonic()
+        position = (reference - self._started) - self._paused_total + self._offset
+        if self.current.duration:
+            position = min(position, self.current.duration)
+        return max(position, 0.0)
+
+    def ensure_task(self):
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._run())
+
+    async def _announce(self, embed=None, view=None):
+        channel = bot.get_channel(self.text_channel_id) if self.text_channel_id else None
+        if channel is None or not hasattr(channel, "send"):
+            return None
+        guild = self.guild
+        try:
+            if guild and not channel.permissions_for(guild.me).send_messages:
+                return None
+            return await channel.send(embed=embed, view=view)
+        except discord.HTTPException:
+            return None
+
+    # ----- control -----
+    def skip(self):
+        voice = self.voice
+        if voice and (voice.is_playing() or voice.is_paused()):
+            self._skip_requested = True
+            voice.stop()
+            return True
+        return False
+
+    def pause(self):
+        voice = self.voice
+        if voice and voice.is_playing():
+            voice.pause()
+            self._paused_at = time.monotonic()
+            return True
+        return False
+
+    def resume(self):
+        voice = self.voice
+        if voice and voice.is_paused():
+            voice.resume()
+            if self._paused_at:
+                self._paused_total += time.monotonic() - self._paused_at
+            self._paused_at = None
+            return True
+        return False
+
+    def seek(self, seconds):
+        voice = self.voice
+        if self.current is None or voice is None:
+            return False
+        if voice.is_paused():
+            self.resume()
+        self._seek_to = max(0.0, float(seconds))
+        voice.stop()
+        return True
+
+    def set_filter(self, name):
+        self.filter_name = name
+        if self.current is not None:
+            return self.seek(self.position)
+        return True
+
+    def set_volume(self, percent):
+        self.volume = max(0, min(200, int(percent)))
+        voice = self.voice
+        if voice and isinstance(voice.source, discord.PCMVolumeTransformer):
+            voice.source.volume = self.volume / 100
+        settings = _music_settings(self.guild_id)
+        settings["volume"] = self.volume
+        save_config()
+
+    def request_skip(self, member):
+        voice = self.voice
+        track = self.current
+        if voice is None or track is None:
+            return False, "Nothing is playing."
+        listeners = [m for m in voice.channel.members if not m.bot]
+        if member.id == track.requester_id or _music_has_dj_power(member) or len(listeners) <= 1:
+            self.skip()
+            return True, "Skipped."
+        self.skip_votes.add(member.id)
+        needed = len(listeners) // 2 + 1
+        votes = len(self.skip_votes & {m.id for m in listeners})
+        if votes >= needed:
+            self.skip()
+            return True, "Vote passed. Skipped."
+        return False, f"Vote to skip registered ({votes}/{needed})."
+
+    # ----- playback loop -----
+    def _make_source(self, track, start):
+        before = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+        if start > 0:
+            before += f" -ss {start:.2f}"
+        options = "-vn"
+        chain = MUSIC_FILTERS.get(self.filter_name)
+        if chain:
+            options += f' -af "{chain}"'
+        source = discord.FFmpegPCMAudio(track.stream_url, before_options=before, options=options)
+        return discord.PCMVolumeTransformer(source, volume=self.volume / 100)
+
+    async def _autoplay_fill(self):
+        if not self.history:
+            return 0
+        seed = self.history[-1]
+        known = {t.webpage_url for t in self.history}
+        tracks = []
+        try:
+            match = re.search(r"[?&]v=([\w-]{11})", seed.webpage_url or "")
+            if match:
+                vid = match.group(1)
+                info = await _ytdl_run(_ytdl_extract_sync, f"https://www.youtube.com/watch?v={vid}&list=RD{vid}",
+                                       flat=True, noplaylist=False, limit=12)
+                tracks = [t for t in (_music_track_from_info(e, None) for e in (info.get("entries") or []) if e) if t]
+            if not tracks:
+                tracks = await music_search(f"{seed.title} {seed.uploader or ''}".strip(), None, 6)
+        except MusicError:
+            return 0
+        added = 0
+        for track in tracks:
+            if track.webpage_url in known:
+                continue
+            track.requester_id = 0
+            track.requester_name = "Autoplay"
+            self.queue.append(track)
+            added += 1
+            if added >= 3:
+                break
+        return added
+
+    async def _run(self):
+        try:
+            while True:
+                self.queue_event.clear()
+                track = self.queue.popleft() if self.queue else None
+                if track is None:
+                    if self.autoplay and await self._autoplay_fill():
+                        continue
+                    self.current = None
+                    try:
+                        await asyncio.wait_for(self.queue_event.wait(), timeout=None if self.stay_247 else MUSIC_IDLE_TIMEOUT)
+                        continue
+                    except asyncio.TimeoutError:
+                        await self._announce(feature_embed("Queue Finished", "The queue ended, so I left the voice channel."))
+                        await music_destroy(self.guild_id)
+                        return
+                if not await self._play_track(track):
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Music player loop crashed in guild %s", self.guild_id)
+            await music_destroy(self.guild_id)
+
+    async def _play_track(self, track):
+        voice = self.voice
+        if voice is None or not voice.is_connected():
+            await music_destroy(self.guild_id)
+            return False
+        self.current = track
+        self.skip_votes.clear()
+        try:
+            await track.ensure_stream()
+        except MusicError as exc:
+            await self._announce(feature_embed(f"{ERROR_EMOJI} Playback Error", f"Could not play **{_md_safe(track.title)}**: {exc}"))
+            self.current = None
+            return True
+
+        start = 0.0
+        announce = True
+        loop = asyncio.get_running_loop()
+        while True:
+            self._seek_to = None
+            try:
+                source = self._make_source(track, start)
+                finished = asyncio.Event()
+
+                def after(error, finished=finished):
+                    if error:
+                        logger.warning("Music playback error: %s", error)
+                    loop.call_soon_threadsafe(finished.set)
+
+                voice.play(source, after=after)
+            except (discord.ClientException, OSError) as exc:
+                await self._announce(feature_embed(f"{ERROR_EMOJI} Playback Error", f"FFmpeg could not start. Make sure `ffmpeg` is installed. ({str(exc)[:120]})"))
+                self.current = None
+                return True
+            self._started = time.monotonic()
+            self._offset = start
+            self._paused_at = None
+            self._paused_total = 0.0
+            if announce:
+                announce = False
+                await self._send_now_playing()
+            await finished.wait()
+            if self._seek_to is not None and voice.is_connected():
+                start = self._seek_to
+                continue
+            break
+
+        finished_track = self.current
+        self.current = None
+        if finished_track is not None:
+            if self.loop_mode == "track" and not self._skip_requested:
+                self.queue.appendleft(finished_track)
+            else:
+                self.history.append(finished_track)
+                if self.loop_mode == "queue":
+                    self.queue.append(finished_track)
+        self._skip_requested = False
+        return True
+
+    async def _send_now_playing(self):
+        if self.now_message is not None:
+            try:
+                await self.now_message.edit(view=None)
+            except discord.HTTPException:
+                pass
+        self.now_message = await self._announce(_music_now_embed(self), MusicControlView(self.guild_id))
+
+
+def _music_progress_bar(position, duration, width=18):
+    if not duration:
+        return "Live stream"
+    ratio = min(max(position / duration, 0), 1)
+    filled = int(ratio * width)
+    return f"`{_fmt_duration(position)}` " + "━" * filled + "●" + "─" * (width - filled) + f" `{_fmt_duration(duration)}`"
+
+
+def _music_now_embed(player):
+    track = player.current
+    if track is None:
+        return feature_embed("Now Playing", "Nothing is playing right now.")
+    embed = feature_embed("Now Playing", f"[{_md_safe(track.title, 100)}]({track.webpage_url})\n{_music_progress_bar(player.position, track.duration)}")
+    embed.add_field(name="Requested by", value=track.requester_name, inline=True)
+    embed.add_field(name="Duration", value=_fmt_duration(track.duration), inline=True)
+    embed.add_field(name="Volume", value=f"{player.volume}%", inline=True)
+    embed.add_field(name="Loop", value=player.loop_mode.title(), inline=True)
+    embed.add_field(name="Filter", value="None" if player.filter_name == "off" else player.filter_name, inline=True)
+    embed.add_field(name="Autoplay", value="On" if player.autoplay else "Off", inline=True)
+    if player.queue:
+        embed.add_field(name="Up next", value=_md_safe(player.queue[0].title, 80), inline=False)
+    if track.thumbnail:
+        embed.set_thumbnail(url=track.thumbnail)
+    return embed
+
+
+async def music_destroy(guild_id):
+    player = MUSIC_PLAYERS.pop(guild_id, None)
+    guild = bot.get_guild(guild_id)
+    if player is not None:
+        player.queue.clear()
+        for task in (player.alone_task, player.task):
+            if task is not None and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+        if player.now_message is not None:
+            try:
+                await player.now_message.edit(view=None)
+            except discord.HTTPException:
+                pass
+    voice = guild.voice_client if guild else None
+    if voice is not None:
+        try:
+            voice.stop()
+            await voice.disconnect(force=True)
+        except Exception:
+            pass
+
+
+# ----- permissions -----
+def _music_has_dj_power(member):
+    if has_admin_access(member) or member.guild_permissions.manage_guild:
+        return True
+    role_id = int(_music_settings(member.guild.id).get("dj_role_id") or 0)
+    return bool(role_id and any(role.id == role_id for role in member.roles))
+
+
+def _music_dj_ok(member):
+    role_id = int(_music_settings(member.guild.id).get("dj_role_id") or 0)
+    return True if not role_id else _music_has_dj_power(member)
+
+
+async def _music_precheck(ctx, *, join=False, dj=False, playing=False, strict_dj=False):
+    """Validate voice state and return the guild's MusicPlayer (creating/joining when join=True)."""
+    voice_state = getattr(ctx.author, "voice", None)
+    if not voice_state or not voice_state.channel:
+        await _music_error(ctx, "Join a voice channel first.")
+        return None
+    channel = voice_state.channel
+    voice = ctx.guild.voice_client
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    connected = voice is not None and voice.is_connected()
+    if connected and voice.channel.id != channel.id:
+        busy = player is not None and (player.current is not None or player.queue)
+        humans = [m for m in voice.channel.members if not m.bot]
+        if busy and humans:
+            await _music_error(ctx, f"I'm already playing in {voice.channel.mention}. Join that channel to control me.")
+            return None
+        if not join:
+            await _music_error(ctx, f"I'm connected to {voice.channel.mention}. Join that channel first.")
+            return None
+    if not connected and not join:
+        await _music_error(ctx, "I'm not connected to a voice channel.")
+        return None
+    if strict_dj and not _music_has_dj_power(ctx.author):
+        await _music_error(ctx, "You need the DJ role or Manage Server permission for that.")
+        return None
+    if dj and not _music_dj_ok(ctx.author):
+        await _music_error(ctx, "A DJ role is set in this server, and you don't have it.")
+        return None
+    if join:
+        permissions = channel.permissions_for(ctx.guild.me)
+        if not (permissions.view_channel and permissions.connect and permissions.speak):
+            await _music_error(ctx, f"I need View Channel, Connect and Speak permissions in {channel.mention}.")
+            return None
+        try:
+            if connected:
+                if voice.channel.id != channel.id:
+                    await voice.move_to(channel)
+            else:
+                await channel.connect(timeout=20, reconnect=True, self_deaf=True)
+        except (discord.ClientException, discord.Forbidden, discord.HTTPException, asyncio.TimeoutError) as exc:
+            await _music_error(ctx, f"Could not join the voice channel. Check my permissions and that voice dependencies are installed. ({str(exc)[:100]})")
+            return None
+        if player is None:
+            player = MusicPlayer(ctx.guild.id)
+            MUSIC_PLAYERS[ctx.guild.id] = player
+        player.text_channel_id = ctx.channel.id
+        player.ensure_task()
+        return player
+    if player is None:
+        await _music_error(ctx, "Nothing is playing.")
+        return None
+    player.text_channel_id = ctx.channel.id
+    if playing and player.current is None:
+        await _music_error(ctx, "Nothing is playing.")
+        return None
+    return player
+
+
+def _music_queue_embed(player, page):
+    per_page = 10
+    total_pages = max(1, math.ceil(len(player.queue) / per_page))
+    page = max(1, min(page, total_pages))
+    lines = []
+    if player.current:
+        lines.append(f"**Now playing:** [{_md_safe(player.current.title, 70)}]({player.current.webpage_url}) `{_fmt_duration(player.current.duration)}`\n")
+    items = list(player.queue)[(page - 1) * per_page: page * per_page]
+    for offset, track in enumerate(items, start=(page - 1) * per_page + 1):
+        lines.append(f"`{offset}.` [{_md_safe(track.title, 55)}]({track.webpage_url}) `{_fmt_duration(track.duration)}` — {track.requester_name}")
+    if not items:
+        lines.append("The queue is empty.")
+    total_seconds = sum(t.duration or 0 for t in player.queue)
+    embed = feature_embed("Music Queue", "\n".join(lines))
+    embed.set_footer(text=f"Page {page}/{total_pages} • {len(player.queue)} queued • {_fmt_duration(total_seconds)} • Loop: {player.loop_mode}")
+    return embed, page, total_pages
+
+
+class MusicQueueView(discord.ui.View):
+    def __init__(self, guild_id, author_id, page, total_pages):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self._sync()
+
+    def _sync(self):
+        self.previous_button.disabled = self.page <= 1
+        self.next_button.disabled = self.page >= self.total_pages
+
+    async def _show(self, interaction):
+        player = MUSIC_PLAYERS.get(self.guild_id)
+        if player is None:
+            return await interaction.response.edit_message(content="The queue no longer exists.", embed=None, view=None)
+        embed, self.page, self.total_pages = _music_queue_embed(player, self.page)
+        self._sync()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Only the person who opened this queue can page it.", ephemeral=True)
+        self.page -= 1
+        await self._show(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Only the person who opened this queue can page it.", ephemeral=True)
+        self.page += 1
+        await self._show(interaction)
+
+
+def _music_interaction_player(interaction, *, dj=False):
+    """Validate a button click. Returns (player, error_text)."""
+    player = MUSIC_PLAYERS.get(interaction.guild_id)
+    voice = interaction.guild.voice_client if interaction.guild else None
+    if player is None or voice is None:
+        return None, "The player is no longer active."
+    member = interaction.user
+    if not getattr(member, "voice", None) or member.voice.channel is None or member.voice.channel.id != voice.channel.id:
+        return None, "Join my voice channel to use the controls."
+    if dj and not _music_dj_ok(member):
+        return None, "A DJ role is set in this server, and you don't have it."
+    return player, None
+
+
+class MusicControlView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Pause/Resume", style=discord.ButtonStyle.primary)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player, error = _music_interaction_player(interaction, dj=True)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+        text = "Paused." if player.pause() else ("Resumed." if player.resume() else "Nothing to pause.")
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player, error = _music_interaction_player(interaction)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+        _, text = player.request_skip(interaction.user)
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="Loop", style=discord.ButtonStyle.secondary)
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player, error = _music_interaction_player(interaction, dj=True)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+        player.loop_mode = {"off": "track", "track": "queue", "queue": "off"}[player.loop_mode]
+        await interaction.response.send_message(f"Loop mode: **{player.loop_mode}**.", ephemeral=True)
+
+    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary)
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player, error = _music_interaction_player(interaction, dj=True)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+        items = list(player.queue)
+        random.shuffle(items)
+        player.queue = deque(items)
+        await interaction.response.send_message("Queue shuffled.", ephemeral=True)
+
+    @discord.ui.button(label="Queue", style=discord.ButtonStyle.secondary)
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = MUSIC_PLAYERS.get(interaction.guild_id)
+        if player is None:
+            return await interaction.response.send_message("The player is no longer active.", ephemeral=True)
+        embed, _, _ = _music_queue_embed(player, 1)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player, error = _music_interaction_player(interaction, dj=True)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+        await interaction.response.send_message("Stopped playback and cleared the queue.", ephemeral=True)
+        await _music_stop(player)
+
+
+async def _music_stop(player):
+    if player.stay_247:
+        player.queue.clear()
+        player.loop_mode = "off"
+        player.autoplay = False
+        player.skip()
+    else:
+        await music_destroy(player.guild_id)
+
+
+# ----- queueing -----
+async def _music_enqueue(ctx, player, tracks, playlist_title, mode):
+    room = MUSIC_MAX_QUEUE - len(player.queue)
+    if room <= 0:
+        return await _music_error(ctx, f"The queue is full ({MUSIC_MAX_QUEUE} tracks).")
+    tracks = tracks[:room]
+    was_idle = player.current is None and not player.queue
+    if mode in {"next", "now"}:
+        for track in reversed(tracks):
+            player.queue.appendleft(track)
+    else:
+        player.queue.extend(tracks)
+    player.queue_event.set()
+    if mode == "now" and player.current is not None:
+        player.skip()
+    if was_idle and not playlist_title:
+        return
+    if playlist_title:
+        embed = feature_embed("Playlist Queued", f"Added **{len(tracks)}** tracks from **{_md_safe(playlist_title, 80)}**.")
+    else:
+        track = tracks[0]
+        position = 1 if mode in {"next", "now"} else len(player.queue)
+        embed = feature_embed("Track Queued", f"[{_md_safe(track.title, 90)}]({track.webpage_url})")
+        embed.add_field(name="Position", value=str(position), inline=True)
+        embed.add_field(name="Duration", value=_fmt_duration(track.duration), inline=True)
+        if track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
+    await ctx.reply(embed=embed, mention_author=False)
+
+
+async def _music_play(ctx, query, mode):
+    if yt_dlp is None:
+        return await _music_error(ctx, "Music is unavailable because `yt-dlp` is not installed on the host.")
+    if shutil.which("ffmpeg") is None:
+        return await _music_error(ctx, "Music is unavailable because `ffmpeg` is not installed on the host.")
+    if not query and ctx.message.attachments:
+        query = ctx.message.attachments[0].url
+    if not query:
+        player = MUSIC_PLAYERS.get(ctx.guild.id)
+        if player and player.resume():
+            return await ctx.reply(embed=feature_embed("Music", "Resumed playback."), mention_author=False)
+        return await _music_error(ctx, f"Usage: `{ctx.clean_prefix}play <song name or link>`")
+    player = await _music_precheck(ctx, join=True)
+    if player is None:
+        return
+    async with ctx.typing():
+        try:
+            tracks, playlist_title = await music_resolve(query, ctx.author)
+        except MusicError as exc:
+            return await _music_error(ctx, str(exc))
+    if not tracks:
+        return await _music_error(ctx, "No results found.")
+    await _music_enqueue(ctx, player, tracks, playlist_title, mode)
+
+
+@bot.command(name="play", aliases=["p"])
+@commands.guild_only()
+async def music_play_command(ctx, *, query: str = None):
+    await _music_play(ctx, query, "queue")
+
+
+@bot.command(name="playnext", aliases=["pn", "playtop", "pt"])
+@commands.guild_only()
+async def music_playnext_command(ctx, *, query: str = None):
+    if not query and not ctx.message.attachments:
+        return await _music_error(ctx, f"Usage: `{ctx.clean_prefix}playnext <song name or link>`")
+    await _music_play(ctx, query, "next")
+
+
+@bot.command(name="playskip", aliases=["ps", "forceplay", "fp"])
+@commands.guild_only()
+async def music_playskip_command(ctx, *, query: str = None):
+    if not query and not ctx.message.attachments:
+        return await _music_error(ctx, f"Usage: `{ctx.clean_prefix}playskip <song name or link>`")
+    if not _music_dj_ok(ctx.author):
+        return await _music_error(ctx, "A DJ role is set in this server, and you don't have it.")
+    await _music_play(ctx, query, "now")
+
+
+class MusicSearchSelect(discord.ui.Select):
+    def __init__(self, ctx, tracks):
+        self.ctx = ctx
+        self.tracks = tracks
+        options = [
+            discord.SelectOption(label=_md_safe(t.title, 100), value=str(i),
+                                 description=f"{_md_safe(t.uploader or 'Unknown', 60)} • {_fmt_duration(t.duration)}"[:100])
+            for i, t in enumerate(tracks)
+        ]
+        super().__init__(placeholder="Pick a track to queue", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx.author.id:
+            return await interaction.response.send_message("Only the person who searched can choose.", ephemeral=True)
+        track = self.tracks[int(self.values[0])]
+        await interaction.response.edit_message(content=f"Selected **{_md_safe(track.title, 80)}**.", embed=None, view=None)
+        player = await _music_precheck(self.ctx, join=True)
+        if player is None:
+            return
+        await _music_enqueue(self.ctx, player, [track], None, "queue")
+
+
+@bot.command(name="search", aliases=["find"])
+@commands.guild_only()
+async def music_search_command(ctx, *, query: str):
+    if yt_dlp is None or shutil.which("ffmpeg") is None:
+        return await _music_error(ctx, "Music is unavailable because `yt-dlp` or `ffmpeg` is not installed on the host.")
+    if not getattr(ctx.author, "voice", None) or not ctx.author.voice.channel:
+        return await _music_error(ctx, "Join a voice channel first.")
+    async with ctx.typing():
+        try:
+            tracks = await music_search(query, ctx.author, 5)
+        except MusicError as exc:
+            return await _music_error(ctx, str(exc))
+    lines = [f"`{i}.` {_md_safe(t.title, 70)} `{_fmt_duration(t.duration)}`" for i, t in enumerate(tracks, 1)]
+    view = discord.ui.View(timeout=60)
+    view.add_item(MusicSearchSelect(ctx, tracks))
+    await ctx.reply(embed=feature_embed("Search Results", "\n".join(lines)), view=view, mention_author=False)
+
+
+@bot.command(name="join", aliases=["connect", "summon"])
+@commands.guild_only()
+async def music_join_command(ctx):
+    player = await _music_precheck(ctx, join=True)
+    if player is not None:
+        await ctx.reply(embed=feature_embed("Voice Connected", f"Joined {ctx.author.voice.channel.mention}."), mention_author=False)
+
+
+@bot.command(name="leave", aliases=["disconnect", "dc"])
+@commands.guild_only()
+async def music_leave_command(ctx):
+    voice = ctx.guild.voice_client
+    if voice is None or not voice.is_connected():
+        return await _music_error(ctx, "I'm not connected to a voice channel.")
+    if MUSIC_PLAYERS.get(ctx.guild.id):
+        if await _music_precheck(ctx, dj=True) is None:
+            return
+    elif not has_admin_access(ctx.author):
+        return await _music_error(ctx, "Only administrators can disconnect me when nothing is playing.")
+    await music_destroy(ctx.guild.id)
+    await ctx.reply(embed=feature_embed("Voice Disconnected", "Left the voice channel."), mention_author=False)
+
+
+@bot.command(name="stop")
+@commands.guild_only()
+async def music_stop_command(ctx):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    await _music_stop(player)
+    await ctx.reply(embed=feature_embed("Playback Stopped", "Stopped the music and cleared the queue."), mention_author=False)
+
+
+@bot.command(name="pause")
+@commands.guild_only()
+async def music_pause_command(ctx):
+    player = await _music_precheck(ctx, dj=True, playing=True)
+    if player is None:
+        return
+    if player.pause():
+        await ctx.reply(embed=feature_embed("Music", "Paused."), mention_author=False)
+    else:
+        await _music_error(ctx, "Playback is already paused.")
+
+
+@bot.command(name="resume", aliases=["unpause"])
+@commands.guild_only()
+async def music_resume_command(ctx):
+    player = await _music_precheck(ctx, dj=True, playing=True)
+    if player is None:
+        return
+    if player.resume():
+        await ctx.reply(embed=feature_embed("Music", "Resumed."), mention_author=False)
+    else:
+        await _music_error(ctx, "Playback is not paused.")
+
+
+@bot.command(name="skip", aliases=["s", "next", "voteskip"])
+@commands.guild_only()
+async def music_skip_command(ctx):
+    player = await _music_precheck(ctx, playing=True)
+    if player is None:
+        return
+    _, text = player.request_skip(ctx.author)
+    await ctx.reply(embed=feature_embed("Skip", text), mention_author=False)
+
+
+@bot.command(name="forceskip", aliases=["fs", "fskip"])
+@commands.guild_only()
+async def music_forceskip_command(ctx):
+    player = await _music_precheck(ctx, playing=True, strict_dj=True)
+    if player is None:
+        return
+    player.skip()
+    await ctx.reply(embed=feature_embed("Skip", "Force skipped."), mention_author=False)
+
+
+@bot.command(name="skipto", aliases=["jump", "st"])
+@commands.guild_only()
+async def music_skipto_command(ctx, position: int):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    if not 1 <= position <= len(player.queue):
+        return await _music_error(ctx, f"Choose a position from 1 to {len(player.queue)}.")
+    for _ in range(position - 1):
+        player.history.append(player.queue.popleft())
+    if player.current is not None:
+        player.skip()
+    else:
+        player.queue_event.set()
+    await ctx.reply(embed=feature_embed("Skip", f"Skipped to position {position}."), mention_author=False)
+
+
+@bot.command(name="previous", aliases=["prev", "back"])
+@commands.guild_only()
+async def music_previous_command(ctx):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    if not player.history:
+        return await _music_error(ctx, "There is no previous track.")
+    player.queue.appendleft(player.history.pop())
+    if player.current is not None:
+        player.skip()
+    else:
+        player.queue_event.set()
+    await ctx.reply(embed=feature_embed("Music", "Going back to the previous track."), mention_author=False)
+
+
+@bot.command(name="queue", aliases=["q", "list"])
+@commands.guild_only()
+async def music_queue_command(ctx, page: int = 1):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    if player is None or (player.current is None and not player.queue):
+        return await _music_error(ctx, "The queue is empty.")
+    embed, page, total = _music_queue_embed(player, page)
+    view = MusicQueueView(ctx.guild.id, ctx.author.id, page, total) if total > 1 else None
+    await ctx.reply(embed=embed, view=view, mention_author=False)
+
+
+@bot.command(name="nowplaying", aliases=["np", "now", "current", "playing"])
+@commands.guild_only()
+async def music_nowplaying_command(ctx):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    if player is None or player.current is None:
+        return await _music_error(ctx, "Nothing is playing.")
+    await ctx.reply(embed=_music_now_embed(player), mention_author=False)
+
+
+@bot.command(name="volume", aliases=["vol", "v"])
+@commands.guild_only()
+async def music_volume_command(ctx, level: int = None):
+    player = await _music_precheck(ctx, dj=level is not None)
+    if player is None:
+        return
+    if level is None:
+        return await ctx.reply(embed=feature_embed("Volume", f"Current volume is **{player.volume}%**."), mention_author=False)
+    if not 0 <= level <= 200:
+        return await _music_error(ctx, "Volume must be between 0 and 200.")
+    player.set_volume(level)
+    note = " Values above 100 may distort." if level > 100 else ""
+    await ctx.reply(embed=feature_embed("Volume", f"Volume set to **{level}%**.{note}"), mention_author=False)
+
+
+@bot.command(name="loop", aliases=["repeat", "l"])
+@commands.guild_only()
+async def music_loop_command(ctx, mode: str = None):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    aliases = {"off": "off", "none": "off", "disable": "off", "track": "track", "song": "track", "one": "track",
+               "single": "track", "current": "track", "queue": "queue", "all": "queue", "playlist": "queue"}
+    if mode is None:
+        new_mode = {"off": "track", "track": "queue", "queue": "off"}[player.loop_mode]
+    elif mode.lower() in aliases:
+        new_mode = aliases[mode.lower()]
+    else:
+        return await _music_error(ctx, "Use `off`, `track`, or `queue` (or run the command with no argument to cycle).")
+    player.loop_mode = new_mode
+    await ctx.reply(embed=feature_embed("Loop", f"Loop mode: **{new_mode}**."), mention_author=False)
+
+
+@bot.command(name="shuffle", aliases=["mix"])
+@commands.guild_only()
+async def music_shuffle_command(ctx):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    if len(player.queue) < 2:
+        return await _music_error(ctx, "Add at least two tracks to shuffle.")
+    items = list(player.queue)
+    random.shuffle(items)
+    player.queue = deque(items)
+    await ctx.reply(embed=feature_embed("Shuffle", f"Shuffled **{len(items)}** tracks."), mention_author=False)
+
+
+@bot.command(name="clear", aliases=["cq", "clearqueue", "empty"])
+@commands.guild_only()
+async def music_clear_command(ctx):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    count = len(player.queue)
+    player.queue.clear()
+    await ctx.reply(embed=feature_embed("Queue Cleared", f"Removed **{count}** queued track(s)."), mention_author=False)
+
+
+@bot.command(name="remove", aliases=["rm"])
+@commands.guild_only()
+async def music_remove_command(ctx, position: str):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", position.strip())
+    if not match:
+        return await _music_error(ctx, "Use a position like `3` or a range like `2-5`.")
+    start = int(match.group(1))
+    end = int(match.group(2) or start)
+    if start > end or start < 1 or end > len(player.queue):
+        return await _music_error(ctx, f"Choose positions between 1 and {len(player.queue)}.")
+    items = list(player.queue)
+    removed = items[start - 1:end]
+    del items[start - 1:end]
+    player.queue = deque(items)
+    label = _md_safe(removed[0].title, 60) if len(removed) == 1 else f"{len(removed)} tracks"
+    await ctx.reply(embed=feature_embed("Removed", f"Removed **{label}** from the queue."), mention_author=False)
+
+
+@bot.command(name="move", aliases=["mv"])
+@commands.guild_only()
+async def music_move_command(ctx, source: int, destination: int):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    size = len(player.queue)
+    if not (1 <= source <= size and 1 <= destination <= size):
+        return await _music_error(ctx, f"Positions must be between 1 and {size}.")
+    items = list(player.queue)
+    track = items.pop(source - 1)
+    items.insert(destination - 1, track)
+    player.queue = deque(items)
+    await ctx.reply(embed=feature_embed("Moved", f"Moved **{_md_safe(track.title, 60)}** to position {destination}."), mention_author=False)
+
+
+async def _music_seek_to(ctx, seconds):
+    player = await _music_precheck(ctx, dj=True, playing=True)
+    if player is None:
+        return
+    track = player.current
+    if not track.duration:
+        return await _music_error(ctx, "You can't seek in a live stream.")
+    seconds = max(0, min(seconds, track.duration - 1))
+    player.seek(seconds)
+    await ctx.reply(embed=feature_embed("Seek", f"Moved to **{_fmt_duration(seconds)}**."), mention_author=False)
+
+
+@bot.command(name="seek", aliases=["goto"])
+@commands.guild_only()
+async def music_seek_command(ctx, *, timestamp: str):
+    seconds = _parse_timestamp(timestamp)
+    if seconds is None:
+        return await _music_error(ctx, "Use a time like `90`, `1:30`, or `1m30s`.")
+    await _music_seek_to(ctx, seconds)
+
+
+@bot.command(name="forward", aliases=["fwd", "ff"])
+@commands.guild_only()
+async def music_forward_command(ctx, seconds: int = 10):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    if player is None or player.current is None:
+        return await _music_error(ctx, "Nothing is playing.")
+    await _music_seek_to(ctx, int(player.position) + max(1, seconds))
+
+
+@bot.command(name="rewind", aliases=["rew", "rwd"])
+@commands.guild_only()
+async def music_rewind_command(ctx, seconds: int = 10):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    if player is None or player.current is None:
+        return await _music_error(ctx, "Nothing is playing.")
+    await _music_seek_to(ctx, int(player.position) - max(1, seconds))
+
+
+@bot.command(name="replay", aliases=["restart"])
+@commands.guild_only()
+async def music_replay_command(ctx):
+    await _music_seek_to(ctx, 0)
+
+
+async def _music_apply_filter(ctx, name):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    name = MUSIC_FILTER_ALIASES.get(name.lower(), name.lower())
+    if name not in MUSIC_FILTERS:
+        return await _music_error(ctx, "Unknown filter. Available: " + ", ".join(f"`{n}`" for n in MUSIC_FILTERS) + ".")
+    player.set_filter(name)
+    text = "All filters removed." if name == "off" else f"Filter **{name}** applied. It takes effect within a moment."
+    await ctx.reply(embed=feature_embed("Audio Filter", text), mention_author=False)
+
+
+@bot.command(name="filter", aliases=["filters", "fx", "effect"])
+@commands.guild_only()
+async def music_filter_command(ctx, name: str = None):
+    if name is None:
+        player = MUSIC_PLAYERS.get(ctx.guild.id)
+        active = player.filter_name if player else "off"
+        return await ctx.reply(embed=feature_embed("Audio Filters", f"Active: **{active}**\nAvailable: " + ", ".join(f"`{n}`" for n in MUSIC_FILTERS)), mention_author=False)
+    await _music_apply_filter(ctx, name)
+
+
+@bot.command(name="bassboost", aliases=["bb", "bass"])
+@commands.guild_only()
+async def music_bassboost_command(ctx, level: str = "medium"):
+    level = level.lower()
+    mapping = {"low": "bassboost_low", "medium": "bassboost", "med": "bassboost", "high": "bassboost_high", "off": "off"}
+    if level not in mapping:
+        return await _music_error(ctx, "Use `low`, `medium`, `high`, or `off`.")
+    await _music_apply_filter(ctx, mapping[level])
+
+
+@bot.command(name="nightcore", aliases=["nc"])
+@commands.guild_only()
+async def music_nightcore_command(ctx):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    await _music_apply_filter(ctx, "off" if player and player.filter_name == "nightcore" else "nightcore")
+
+
+@bot.command(name="vaporwave", aliases=["slowed"])
+@commands.guild_only()
+async def music_vaporwave_command(ctx):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    await _music_apply_filter(ctx, "off" if player and player.filter_name == "vaporwave" else "vaporwave")
+
+
+@bot.command(name="8d")
+@commands.guild_only()
+async def music_8d_command(ctx):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    await _music_apply_filter(ctx, "off" if player and player.filter_name == "8d" else "8d")
+
+
+@bot.command(name="autoplay", aliases=["ap"])
+@commands.guild_only()
+async def music_autoplay_command(ctx):
+    player = await _music_precheck(ctx, dj=True)
+    if player is None:
+        return
+    player.autoplay = not player.autoplay
+    player.queue_event.set()
+    await ctx.reply(embed=feature_embed("Autoplay", f"Autoplay is now **{'on' if player.autoplay else 'off'}**. I'll queue related tracks when the queue runs out."), mention_author=False)
+
+
+@bot.command(name="247", aliases=["24/7", "stay"])
+@commands.guild_only()
+async def music_247_command(ctx):
+    if not await manager_check(ctx):
+        return
+    player = await _music_precheck(ctx, join=True)
+    if player is None:
+        return
+    player.stay_247 = not player.stay_247
+    settings = _music_settings(ctx.guild.id)
+    settings["stay_247"] = player.stay_247
+    save_config()
+    player.queue_event.set()
+    await ctx.reply(embed=feature_embed("24/7 Mode", f"24/7 mode is now **{'on' if player.stay_247 else 'off'}**. "
+                                        + ("I'll stay in the voice channel until it's turned off or the bot restarts." if player.stay_247 else "I'll leave when idle or alone.")), mention_author=False)
+
+
+@bot.command(name="djrole", aliases=["dj"])
+@commands.guild_only()
+async def music_djrole_command(ctx, role: discord.Role = None):
+    if not await manager_check(ctx):
+        return
+    settings = _music_settings(ctx.guild.id)
+    if role is None:
+        current = int(settings.get("dj_role_id") or 0)
+        text = f"Current DJ role: <@&{current}>." if current else f"No DJ role is set, so everyone can control music. Use `{ctx.clean_prefix}djrole @role` to set one, or `{ctx.clean_prefix}djrole off`."
+        return await ctx.reply(embed=feature_embed("DJ Role", text), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    settings["dj_role_id"] = role.id
+    save_config()
+    await ctx.reply(embed=feature_embed("DJ Role", f"DJ role set to {role.mention}. Members with it (and Manage Server) control the player."), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.command(name="djoff")
+@commands.guild_only()
+async def music_djoff_command(ctx):
+    if not await manager_check(ctx):
+        return
+    _music_settings(ctx.guild.id).pop("dj_role_id", None)
+    save_config()
+    await ctx.reply(embed=feature_embed("DJ Role", "DJ role removed. Everyone in the voice channel can control music."), mention_author=False)
+
+
+@bot.command(name="history", aliases=["recent"])
+@commands.guild_only()
+async def music_history_command(ctx):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    if player is None or not player.history:
+        return await _music_error(ctx, "No tracks have been played yet.")
+    recent = list(player.history)[-10:][::-1]
+    lines = [f"`{i}.` [{_md_safe(t.title, 70)}]({t.webpage_url}) `{_fmt_duration(t.duration)}`" for i, t in enumerate(recent, 1)]
+    await ctx.reply(embed=feature_embed("Recently Played", "\n".join(lines)), mention_author=False)
+
+
+@bot.command(name="grab", aliases=["save", "yoink"])
+@commands.guild_only()
+async def music_grab_command(ctx):
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    if player is None or player.current is None:
+        return await _music_error(ctx, "Nothing is playing.")
+    track = player.current
+    embed = feature_embed("Saved Track", f"[{_md_safe(track.title, 100)}]({track.webpage_url})\nFrom **{ctx.guild.name}**")
+    embed.add_field(name="Duration", value=_fmt_duration(track.duration), inline=True)
+    if track.thumbnail:
+        embed.set_thumbnail(url=track.thumbnail)
+    try:
+        await ctx.author.send(embed=embed)
+        await ctx.reply(embed=feature_embed("Saved Track", "Sent the current track to your DMs."), mention_author=False)
+    except (discord.Forbidden, discord.HTTPException):
+        await _music_error(ctx, "I couldn't DM you. Enable direct messages from server members.")
+
+
+@bot.listen("on_voice_state_update")
+async def kanade_music_voice_listener(member, before, after):
+    guild = member.guild
+    player = MUSIC_PLAYERS.get(guild.id)
+    if player is None:
+        return
+    if bot.user and member.id == bot.user.id:
+        if after.channel is None:
+            # Disconnected (kicked, channel deleted, or manual disconnect).
+            await music_destroy(guild.id)
+        return
+    voice = guild.voice_client
+    if voice is None or voice.channel is None:
+        return
+    humans = [m for m in voice.channel.members if not m.bot]
+    if humans or player.stay_247:
+        if player.alone_task is not None and not player.alone_task.done():
+            player.alone_task.cancel()
+        player.alone_task = None
+        return
+    if player.alone_task is None or player.alone_task.done():
+        async def leave_when_alone():
+            try:
+                await asyncio.sleep(MUSIC_ALONE_TIMEOUT)
+                current = MUSIC_PLAYERS.get(guild.id)
+                vc = guild.voice_client
+                if current is player and vc and vc.channel and not [m for m in vc.channel.members if not m.bot]:
+                    await player._announce(feature_embed("Voice Disconnected", "Everyone left, so I left the voice channel."))
+                    await music_destroy(guild.id)
+            except asyncio.CancelledError:
+                pass
+        player.alone_task = asyncio.create_task(leave_when_alone())
 
 
 @bot.event
