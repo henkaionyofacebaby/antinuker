@@ -8602,6 +8602,18 @@ bot.tree.add_command(autoresponder_slash)
 # MUSIC (Jockie-style: play/search, queue, loop, shuffle, seek, filters, vote-skip, DJ role, autoplay, 24/7, controls)
 # Requires: ffmpeg on the host, yt-dlp, PyNaCl (install discord.py[voice]).
 # ---------------------------------------------------------------------------
+def _find_ffmpeg():
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+FFMPEG_EXE = _find_ffmpeg()
 MUSIC_PLAYERS = {}
 MUSIC_IDLE_TIMEOUT = 180       # seconds the queue may sit empty before leaving
 MUSIC_ALONE_TIMEOUT = 60       # seconds alone in a channel before leaving
@@ -9261,7 +9273,7 @@ class MusicPlayer:
         if chain:
             options += f' -af "{chain}"'
         self._ffmpeg_log = tempfile.TemporaryFile()
-        source = discord.FFmpegPCMAudio(track.stream_url, before_options=before, options=options, stderr=self._ffmpeg_log)
+        source = discord.FFmpegPCMAudio(track.stream_url, executable=FFMPEG_EXE or "ffmpeg", before_options=before, options=options, stderr=self._ffmpeg_log)
         return discord.PCMVolumeTransformer(source, volume=self.volume / 100)
 
     def _ffmpeg_tail(self):
@@ -9452,13 +9464,59 @@ def _music_startup_report():
                     "configured" if YTDL_COOKIE_FILE else "not configured")
         if shutil.which("deno") is None and shutil.which("node") is None:
             logger.warning("No JavaScript runtime (deno/node) found. Recent yt-dlp releases need one to read YouTube.")
-    if shutil.which("ffmpeg") is None:
-        logger.warning("ffmpeg was not found on PATH; music playback will not work.")
+    if FFMPEG_EXE is None:
+        logger.warning("ffmpeg was not found; add `imageio-ffmpeg` to requirements or install ffmpeg on the host.")
+    import importlib.util
+    for module, label in (("nacl", "PyNaCl"), ("davey", "davey")):
+        if importlib.util.find_spec(module) is None:
+            logger.warning("%s is not installed; voice may connect but stay silent.", label)
     if not (os.getenv("SPOTIFY_CLIENT_ID") and os.getenv("SPOTIFY_CLIENT_SECRET")):
         logger.info("Spotify credentials not set; Spotify links will ask for SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET.")
 
 
 _music_startup_report()
+
+
+@bot.command(name="voicecheck", aliases=["vcheck"])
+@commands.guild_only()
+async def music_voicecheck_command(ctx):
+    """Admins: report the voice/audio dependencies and the live voice connection state."""
+    if not await manager_check(ctx):
+        return
+    import importlib.util
+    def has(module):
+        try:
+            return "installed" if importlib.util.find_spec(module) else "MISSING"
+        except Exception:
+            return "MISSING"
+    try:
+        opus_loaded = discord.opus.is_loaded()
+    except Exception:
+        opus_loaded = False
+    voice = ctx.guild.voice_client
+    player = MUSIC_PLAYERS.get(ctx.guild.id)
+    lines = [
+        f"discord.py: `{discord.__version__}`",
+        f"PyNaCl: `{has('nacl')}`",
+        f"davey (voice encryption): `{has('davey')}`",
+        f"Opus library: `{'loaded' if opus_loaded else 'NOT LOADED'}`",
+        f"ffmpeg: `{FFMPEG_EXE or 'MISSING'}`",
+        f"yt-dlp: `{getattr(getattr(yt_dlp, 'version', None), '__version__', 'MISSING') if yt_dlp else 'MISSING'}`",
+        "",
+    ]
+    if voice is None or not voice.is_connected():
+        lines.append("Voice: not connected")
+    else:
+        lines += [
+            f"Voice: connected to {voice.channel.mention}",
+            f"Playing: `{voice.is_playing()}` | Paused: `{voice.is_paused()}`",
+            f"Source: `{type(voice.source).__name__ if voice.source else 'None'}`",
+            f"Latency: `{voice.latency * 1000:.0f} ms`",
+            f"Encryption mode: `{getattr(voice, 'mode', 'unknown')}`",
+        ]
+    if player is not None:
+        lines.append(f"Queue: `{len(player.queue)}` | Volume: `{player.volume}%` | Position: `{_fmt_duration(player.position)}`")
+    await ctx.reply(embed=feature_embed("Voice Check", "\n".join(lines)), mention_author=False)
 
 
 @bot.command(name="ytupdate", aliases=["updateytdlp"])
@@ -9719,8 +9777,8 @@ async def _music_enqueue(ctx, player, tracks, playlist_title, mode):
 async def _music_play(ctx, query, mode):
     if yt_dlp is None:
         return await _music_error(ctx, "Music is unavailable because `yt-dlp` is not installed on the host.")
-    if shutil.which("ffmpeg") is None:
-        return await _music_error(ctx, "Music is unavailable because `ffmpeg` is not installed on the host.")
+    if FFMPEG_EXE is None:
+        return await _music_error(ctx, "Music is unavailable because `ffmpeg` was not found. Add `imageio-ffmpeg` to requirements (or install ffmpeg on the host).")
     if not query and ctx.message.attachments:
         query = ctx.message.attachments[0].url
     if not query:
@@ -9790,7 +9848,7 @@ class MusicSearchSelect(discord.ui.Select):
 @bot.command(name="search", aliases=["find"])
 @commands.guild_only()
 async def music_search_command(ctx, *, query: str):
-    if yt_dlp is None or shutil.which("ffmpeg") is None:
+    if yt_dlp is None or FFMPEG_EXE is None:
         return await _music_error(ctx, "Music is unavailable because `yt-dlp` or `ffmpeg` is not installed on the host.")
     if not getattr(ctx.author, "voice", None) or not ctx.author.voice.channel:
         return await _music_error(ctx, "Join a voice channel first.")
