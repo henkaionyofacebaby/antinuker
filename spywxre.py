@@ -9133,6 +9133,22 @@ async def music_search(query, requester, count=5):
     raise MusicError("No results found.")
 
 
+class _MeteredSource(discord.PCMVolumeTransformer):
+    """Volume transformer that counts the audio frames it hands to Discord (for !voicecheck)."""
+    def __init__(self, original, volume=1.0):
+        super().__init__(original, volume)
+        self.frames = 0
+        self.loud_frames = 0
+
+    def read(self):
+        data = super().read()
+        if data:
+            self.frames += 1
+            if any(data[::32]):
+                self.loud_frames += 1
+        return data
+
+
 class MusicPlayer:
     def __init__(self, guild_id):
         self.guild_id = guild_id
@@ -9274,7 +9290,7 @@ class MusicPlayer:
             options += f' -af "{chain}"'
         self._ffmpeg_log = tempfile.TemporaryFile()
         source = discord.FFmpegPCMAudio(track.stream_url, executable=FFMPEG_EXE or "ffmpeg", before_options=before, options=options, stderr=self._ffmpeg_log)
-        return discord.PCMVolumeTransformer(source, volume=self.volume / 100)
+        return _MeteredSource(source, volume=self.volume / 100)
 
     def _ffmpeg_tail(self):
         try:
@@ -9516,6 +9532,11 @@ async def music_voicecheck_command(ctx):
         ]
     if player is not None:
         lines.append(f"Queue: `{len(player.queue)}` | Volume: `{player.volume}%` | Position: `{_fmt_duration(player.position)}`")
+        source = voice.source if voice is not None else None
+        if isinstance(source, _MeteredSource):
+            lines.append(f"Audio frames sent: `{source.frames}` | Non-silent frames: `{source.loud_frames}`")
+        tail = player._ffmpeg_tail() if hasattr(player, "_ffmpeg_log") else ""
+        lines.append(f"ffmpeg last message: `{tail or 'none'}`")
     await ctx.reply(embed=feature_embed("Voice Check", "\n".join(lines)), mention_author=False)
 
 
