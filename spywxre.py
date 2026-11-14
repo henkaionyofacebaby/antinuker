@@ -6686,6 +6686,7 @@ import io
 import math
 import random
 import shutil
+import tempfile
 from urllib.parse import urlparse
 
 try:
@@ -8871,12 +8872,12 @@ async def _spotify_token(session):
     client_id = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
     if not client_id or not client_secret:
-        raise MusicError("Spotify links need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` set in the bot's environment variables.")
+        raise SpotifyAccessError("Spotify links need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` set in the bot's environment variables.")
     try:
         async with session.post("https://accounts.spotify.com/api/token", data={"grant_type": "client_credentials"},
                                 auth=aiohttp.BasicAuth(client_id, client_secret)) as response:
             if response.status != 200:
-                raise MusicError("Spotify rejected the configured client ID/secret.")
+                raise SpotifyAccessError("Spotify rejected the configured client ID/secret.")
             payload = await response.json()
     except aiohttp.ClientError:
         raise MusicError("Could not reach Spotify. Try again shortly.")
@@ -8966,19 +8967,72 @@ def _spotify_track(item, requester, fallback_image=None):
     )
 
 
+async def _spotify_from_embed(kind, spotify_id, requester):
+    """No-credentials fallback: read the public embed page's data (works for tracks, albums, playlists)."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=headers) as session:
+            async with session.get(f"https://open.spotify.com/embed/{kind}/{spotify_id}") as response:
+                if response.status != 200:
+                    return None
+                page = await response.text()
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page, re.S)
+        if not match:
+            return None
+        entity = json.loads(match.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+    except (aiohttp.ClientError, KeyError, TypeError, ValueError):
+        return None
+
+    def make(title, artist, duration_ms, url):
+        if not title:
+            return None
+        return MusicTrack(
+            title=f"{title} - {artist}" if artist else title,
+            webpage_url=url,
+            duration=(int(duration_ms) // 1000) if duration_ms else None,
+            uploader=artist,
+            requester_id=getattr(requester, "id", 0),
+            requester_name=getattr(requester, "display_name", str(requester)),
+            search_query=f"{artist or ''} {title} audio".strip(),
+        )
+
+    if kind == "track":
+        artists = ", ".join(a.get("name", "") for a in entity.get("artists", [])[:2] if a.get("name"))
+        track = make(entity.get("name") or entity.get("title"), artists or None, entity.get("duration"),
+                     f"https://open.spotify.com/track/{spotify_id}")
+        return ([track], None) if track else None
+    tracks = []
+    for item in (entity.get("trackList") or [])[:MUSIC_PLAYLIST_LIMIT]:
+        uri = str(item.get("uri", ""))
+        link = f"https://open.spotify.com/track/{uri.split(':')[-1]}" if uri.startswith("spotify:track:") else f"https://open.spotify.com/{kind}/{spotify_id}"
+        track = make(item.get("title"), item.get("subtitle"), item.get("duration"), link)
+        if track:
+            tracks.append(track)
+    return (tracks, entity.get("name") or entity.get("title")) if tracks else None
+
+
 async def spotify_resolve(kind, spotify_id, requester):
+    """Spotify API first; if it refuses (or no credentials), fall back to the public embed/track pages."""
+    try:
+        return await _spotify_via_api(kind, spotify_id, requester)
+    except SpotifyAccessError as exc:
+        result = await _spotify_from_embed(kind, spotify_id, requester)
+        if result:
+            return result
+        if kind == "track":
+            track = await _spotify_scrape_track(spotify_id, requester)
+            if track:
+                return [track], None
+        raise exc
+
+
+async def _spotify_via_api(kind, spotify_id, requester):
     """Turn a Spotify track/album/playlist into queue entries; audio is matched on YouTube at play time."""
     base = "https://api.spotify.com/v1"
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         if kind == "track":
-            try:
-                item = await _spotify_get(session, f"{base}/tracks/{spotify_id}")
-            except SpotifyAccessError as exc:
-                fallback = await _spotify_scrape_track(spotify_id, requester)
-                if fallback is None:
-                    raise exc
-                return [fallback], None
+            item = await _spotify_get(session, f"{base}/tracks/{spotify_id}")
             track = _spotify_track(item, requester)
             if track is None:
                 raise MusicError("That Spotify track can't be played.")
@@ -9206,8 +9260,17 @@ class MusicPlayer:
         chain = MUSIC_FILTERS.get(self.filter_name)
         if chain:
             options += f' -af "{chain}"'
-        source = discord.FFmpegPCMAudio(track.stream_url, before_options=before, options=options)
+        self._ffmpeg_log = tempfile.TemporaryFile()
+        source = discord.FFmpegPCMAudio(track.stream_url, before_options=before, options=options, stderr=self._ffmpeg_log)
         return discord.PCMVolumeTransformer(source, volume=self.volume / 100)
+
+    def _ffmpeg_tail(self):
+        try:
+            self._ffmpeg_log.seek(0)
+            lines = self._ffmpeg_log.read().decode(errors="replace").strip().splitlines()
+            return lines[-1][:300] if lines else ""
+        except Exception:
+            return ""
 
     async def _autoplay_fill(self):
         if not self.history:
@@ -9303,6 +9366,12 @@ class MusicPlayer:
                 announce = False
                 await self._send_now_playing()
             await finished.wait()
+            if (self._seek_to is None and not self._skip_requested and voice.is_connected()
+                    and time.monotonic() - self._started < 3 and (track.duration or 0) > 10):
+                detail = self._ffmpeg_tail()
+                logger.warning("Track ended immediately in guild %s. ffmpeg: %s", self.guild_id, detail)
+                await self._announce(feature_embed(f"{ERROR_EMOJI} Playback Error",
+                                                   "FFmpeg stopped right away, so no audio was sent." + (f"\n`{detail}`" if detail else "")))
             if self._seek_to is not None and voice.is_connected():
                 start = self._seek_to
                 continue
