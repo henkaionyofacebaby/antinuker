@@ -4684,8 +4684,48 @@ async def create_backup(guild):
     return data
 
 
+class RestoreReport:
+    """Result of a backup restore. Unpacks as (roles_count, channels_count) for older callers."""
+    def __init__(self):
+        self.roles_created = 0
+        self.roles_reused = 0
+        self.channels_created = 0
+        self.channels_deleted = 0
+        self.skipped_roles = []      # roles Discord would not let the bot delete
+        self.failed_roles = []       # saved roles that could not be recreated
+        self.failed_deletes = []     # channels that could not be deleted
+        self.failed_channels = []    # saved channels that could not be recreated
+        self.notes = []
+
+    def __iter__(self):
+        return iter((self.roles_created + self.roles_reused + 1, self.channels_created))
+
+    def summary(self):
+        def names(items, limit=8):
+            shown = ", ".join(f"`{i}`" for i in items[:limit])
+            return shown + (f" and {len(items) - limit} more" if len(items) > limit else "")
+        lines = [
+            f"Roles recreated: **{self.roles_created}**" + (f" (reused {self.roles_reused} existing)" if self.roles_reused else ""),
+            f"Channels recreated: **{self.channels_created}**",
+        ]
+        if self.skipped_roles:
+            lines.append(f"Skipped roles (could not delete): {names(self.skipped_roles)}. Move Kanade's highest role above them to replace them next time.")
+        if self.failed_roles:
+            lines.append(f"Roles that could not be recreated: {names(self.failed_roles)}")
+        if self.failed_deletes:
+            lines.append(f"Channels that could not be deleted: {names(self.failed_deletes)}")
+        if self.failed_channels:
+            lines.append(f"Channels that could not be restored: {names(self.failed_channels)}")
+        lines.extend(self.notes)
+        return "\n".join(lines)[:3800]
+
+
 async def restore_backup(guild, code=None, *, replace_channels=True):
-    """Destructively restore a backup: replace removable roles and channels."""
+    """Restore a backup as completely as Discord permissions allow.
+
+    Roles/channels Discord will not let the bot delete are skipped and reported;
+    the restore never stops because of one of them.
+    """
     if code:
         path = backup_code_path(code)
         if not os.path.exists(path):
@@ -4704,28 +4744,79 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
     me = guild.me
     if me is None:
         raise RuntimeError("I could not verify my server permissions. Try again after the bot is ready.")
-    if replace_channels and not me.guild_permissions.manage_channels:
-        raise discord.Forbidden(response=None, message="The bot needs Manage Channels permission to replace channels.")
+    if not me.guild_permissions.manage_channels:
+        raise RuntimeError("Kanade needs the Manage Channels permission to restore channels.")
 
-    # Managed roles (integration/bot roles) and @everyone cannot be deleted by bots.
-    # Validate hierarchy before making any destructive changes.
-    removable_roles = [r for r in guild.roles if r != guild.default_role and not r.managed]
-    if data.get("roles") or removable_roles:
-        if not me.guild_permissions.manage_roles:
-            raise discord.Forbidden(response=None, message="The bot needs Manage Roles permission to replace roles.")
-        blocked = [r.name for r in removable_roles if r >= me.top_role]
-        if blocked:
-            raise RuntimeError(
-                "I cannot replace these roles because they are at or above my highest role: "
-                + ", ".join(f"`{name}`" for name in blocked[:8])
-                + ". Move Kanade's highest role above them and retry."
-            )
-
+    report = RestoreReport()
+    can_manage_roles = me.guild_permissions.manage_roles
     channel_items = data.get("channels", [])
 
-    # Delete all ordinary channels first. Discord's built-in `#moderators` channel
-    # is deliberately preserved, as requested; other managed/protected channels
-    # are skipped only when Discord exposes them as managed.
+    # ---- 1. Roles: delete what we can, remember what must stay ----
+    role_map = {
+        int(data.get("everyone_role_id", guild.default_role.id)): guild.default_role,
+        guild.default_role.id: guild.default_role,
+    }
+    kept_roles = []  # existing roles that cannot be deleted (managed, above the bot, no permission)
+    current_roles = [r for r in guild.roles if r != guild.default_role]
+    for role in sorted(current_roles, key=lambda r: r.position, reverse=True):
+        if role.managed:
+            kept_roles.append(role)
+            continue
+        if not can_manage_roles or role >= me.top_role:
+            kept_roles.append(role)
+            report.skipped_roles.append(role.name)
+            continue
+        try:
+            await role.delete(reason="Kanade backup restore: replacing server roles")
+        except (discord.Forbidden, discord.HTTPException):
+            kept_roles.append(role)
+            report.skipped_roles.append(role.name)
+
+    # ---- 2. Recreate saved roles (reuse same-named roles that had to stay) ----
+    created_roles = []
+    available_kept = list(kept_roles)
+    saved_roles = sorted(data.get("roles", []), key=lambda x: int(x.get("position", 0)))
+    for item in saved_roles:
+        old_id = int(item.get("id", 0))
+        name = str(item.get("name", "Restored Role"))[:100]
+        existing = next((r for r in available_kept if r.name == name), None)
+        if existing is not None:
+            available_kept.remove(existing)
+            if old_id:
+                role_map[old_id] = existing
+            report.roles_reused += 1
+            continue
+        if not can_manage_roles:
+            report.failed_roles.append(name)
+            continue
+        try:
+            role = await guild.create_role(
+                name=name,
+                permissions=discord.Permissions(int(item.get("permissions", 0))),
+                colour=discord.Colour(int(item.get("color", 0))),
+                hoist=bool(item.get("hoist", False)),
+                mentionable=bool(item.get("mentionable", False)),
+                reason="Kanade backup restore: recreating saved roles",
+            )
+        except (discord.Forbidden, discord.HTTPException, TypeError, ValueError):
+            report.failed_roles.append(name)
+            continue
+        if old_id:
+            role_map[old_id] = role
+        created_roles.append((role, int(item.get("position", 1))))
+        report.roles_created += 1
+
+    # Restore the saved hierarchy, clamped below Kanade's top role. A failure here is only a note.
+    if created_roles:
+        max_position = max(1, me.top_role.position - 1)
+        positions = {role: max(1, min(saved, max_position)) for role, saved in created_roles}
+        try:
+            await guild.edit_role_positions(positions=positions, reason="Kanade backup restore: restoring role hierarchy")
+        except (discord.Forbidden, discord.HTTPException):
+            report.notes.append("Roles were recreated, but their saved order could not be fully applied. Check Kanade's role position.")
+
+    # ---- 3. Channels: delete what we can, continue past failures ----
+    channel_map = {}
     if replace_channels:
         current_channels = list(guild.channels)
         current_channels.sort(key=lambda c: isinstance(c, discord.CategoryChannel))
@@ -4734,59 +4825,13 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
                 continue
             try:
                 await channel.delete(reason="Kanade backup restore: replacing server channels")
-            except (discord.Forbidden, discord.HTTPException) as exc:
-                raise RuntimeError(
-                    f"Could not delete `{channel.name}`. Check Manage Channels permission and channel restrictions."
-                ) from exc
-        channel_map = {}
+                report.channels_deleted += 1
+            except (discord.Forbidden, discord.HTTPException):
+                report.failed_deletes.append(channel.name)
     else:
         channel_map = {channel.id: channel for channel in guild.channels}
 
-    # Replace roles, retaining only @everyone and Discord-managed roles.
-    role_map = {
-        int(data.get("everyone_role_id", guild.default_role.id)): guild.default_role,
-        guild.default_role.id: guild.default_role,
-    }
-    for role in sorted(removable_roles, key=lambda r: r.position, reverse=True):
-        try:
-            await role.delete(reason="Kanade backup restore: replacing server roles")
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            raise RuntimeError(f"Could not delete role `{role.name}`. Check role hierarchy and Manage Roles.") from exc
-
-    # Recreate every saved role. Keep the old-ID -> new-role map for channel overwrites.
-    created_roles = []
-    saved_roles = sorted(data.get("roles", []), key=lambda x: int(x.get("position", 0)))
-    for item in saved_roles:
-        try:
-            role = await guild.create_role(
-                name=str(item.get("name", "Restored Role"))[:100],
-                permissions=discord.Permissions(int(item.get("permissions", 0))),
-                colour=discord.Colour(int(item.get("color", 0))),
-                hoist=bool(item.get("hoist", False)),
-                mentionable=bool(item.get("mentionable", False)),
-                reason="Kanade backup restore: recreating saved roles",
-            )
-        except (discord.Forbidden, discord.HTTPException, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Could not recreate role `{item.get('name', 'unknown')}`: {exc}") from exc
-        old_id = int(item.get("id", 0))
-        if old_id:
-            role_map[old_id] = role
-        created_roles.append((role, int(item.get("position", 1))))
-
-    # Discord assigns new roles at the bottom initially. Explicitly restore the saved
-    # hierarchy after all roles exist, clamped below Kanade's top role.
-    if created_roles:
-        positions = {}
-        max_position = max(1, me.top_role.position - 1)
-        for role, saved_position in created_roles:
-            positions[role] = max(1, min(saved_position, max_position))
-        try:
-            await guild.edit_role_positions(positions=positions, reason="Kanade backup restore: restoring role hierarchy")
-        except (discord.Forbidden, discord.HTTPException) as exc:
-            raise RuntimeError("Roles were recreated, but their saved hierarchy could not be applied. Check Kanade's role position.") from exc
-
-    # Create categories first, then their children. Use newly-created role mappings
-    # so channel permission overwrites point at the restored roles, not stale IDs.
+    # ---- 4. Recreate categories first, then their children ----
     ordered = sorted(
         channel_items,
         key=lambda x: (0 if x.get("type") == "category" else 1, int(x.get("position", 0))),
@@ -4794,6 +4839,8 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
     restored_channels = []
     for item in ordered:
         old_id = int(item.get("id", 0))
+        ctype = item.get("type", "text")
+        name = str(item.get("name", "restored-channel"))[:100]
         category = channel_map.get(int(item.get("category_id") or 0))
         if category is None and item.get("category_id"):
             old_cat = next((c for c in channel_items if int(c.get("id", 0)) == int(item["category_id"])), None)
@@ -4810,13 +4857,9 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
             deny = discord.Permissions(int(ow.get("deny", 0)))
             overwrites[target] = discord.PermissionOverwrite.from_pair(allow, deny)
 
-        ctype = item.get("type", "text")
-        name = str(item.get("name", "restored-channel"))[:100]
         reason = "Kanade backup restore: recreating saved channel layout"
         common = {"name": name, "category": category, "overwrites": overwrites, "reason": reason}
         try:
-            # Reuse the Discord-provided protected #moderators channel when the
-            # selected backup also contains one, rather than creating a duplicate.
             protected_moderators = None
             if name.casefold() == "moderators" and ctype in ("text", "news"):
                 protected_moderators = discord.utils.get(guild.text_channels, name=name)
@@ -4833,40 +4876,41 @@ async def restore_backup(guild, code=None, *, replace_channels=True):
             elif ctype == "category":
                 channel = await guild.create_category(name, overwrites=overwrites, reason=reason)
             elif ctype == "voice":
-                kwargs = {"bitrate": int(item.get("bitrate", 64000)), "user_limit": int(item.get("user_limit", 0))}
+                kwargs = {"bitrate": min(int(item.get("bitrate", 64000)), int(guild.bitrate_limit)),
+                          "user_limit": int(item.get("user_limit", 0))}
                 if item.get("rtc_region") and item.get("rtc_region") != "None":
                     kwargs["rtc_region"] = item["rtc_region"]
                 channel = await guild.create_voice_channel(**common, **kwargs)
             elif ctype == "stage_voice":
-                channel = await guild.create_stage_channel(**common)
+                channel = await guild.create_stage_channel(**common, topic=item.get("topic") or "Stage")
             elif ctype == "forum":
                 channel = await guild.create_forum(**common)
             else:
-                channel = await guild.create_text_channel(
-                    **common,
-                    topic=item.get("topic"),
-                    nsfw=bool(item.get("nsfw", False)),
-                    slowmode_delay=int(item.get("slowmode_delay", 0)),
-                    news=(ctype == "news"),
-                )
+                text_kwargs = dict(topic=item.get("topic"), nsfw=bool(item.get("nsfw", False)),
+                                   slowmode_delay=int(item.get("slowmode_delay", 0)))
+                try:
+                    channel = await guild.create_text_channel(**common, news=(ctype == "news"), **text_kwargs)
+                except discord.HTTPException:
+                    if ctype != "news":
+                        raise
+                    # Announcement channels need Community; fall back to a normal text channel.
+                    channel = await guild.create_text_channel(**common, **text_kwargs)
             channel_map[old_id] = channel
             restored_channels.append((channel, int(item.get("position", 0)), ctype))
-        except (discord.Forbidden, discord.HTTPException, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Could not recreate channel `{name}` ({ctype}): {exc}") from exc
+        except (discord.Forbidden, discord.HTTPException, TypeError, ValueError):
+            report.failed_channels.append(f"{name} ({ctype})")
+            logger.warning("Could not restore channel %s (%s) in guild %s", name, ctype, guild.id)
+            continue
+    report.channels_created = len(restored_channels)
 
-    # Apply positions after all channels exist, preserving the saved ordering.
+    # ---- 5. Apply saved ordering; failures here are cosmetic ----
     for channel, saved_position, ctype in restored_channels:
         try:
-            if ctype == "category":
-                await channel.edit(position=saved_position, reason="Kanade backup restore: restoring category order")
-            else:
-                await channel.edit(position=saved_position, reason="Kanade backup restore: restoring channel order")
+            await channel.edit(position=saved_position, reason="Kanade backup restore: restoring channel order")
         except (discord.Forbidden, discord.HTTPException):
-            # Discord may normalize positions when protected channels remain; channel
-            # creation and category membership still succeed, so continue safely.
             logger.warning("Could not apply position %s to restored channel %s", saved_position, channel.name)
 
-    return len(created_roles) + 1, len(restored_channels)
+    return report
 
 
 @bot.group(name="backup", invoke_without_command=True)
@@ -4906,7 +4950,7 @@ async def backup_load(ctx, code: str = None):
     prompt = await ctx.reply(
         embed=feature_embed(
             "Confirm Channel Replacement",
-            "This will **delete existing channels and removable roles**, then rebuild the saved channels, role permissions, and role hierarchy. `@everyone`, Discord-managed roles, and the built-in `#moderators` channel are preserved.\n"
+            "This will **delete existing channels and removable roles**, then rebuild the saved channels, role permissions, and role hierarchy. `@everyone`, Discord-managed roles, roles above Kanade's highest role (skipped), and the built-in `#moderators` channel are preserved.\n"
             "React with ✅ within 30 seconds to continue, or ❌ to cancel.",
             color=discord.Color.orange(),
         ),
@@ -4935,8 +4979,8 @@ async def backup_load(ctx, code: str = None):
             pass
         return
     try:
-        roles_count, channels_count = await restore_backup(ctx.guild, code=code, replace_channels=True)
-        report = feature_embed("Backup Restored", f"Roles available: **{roles_count}**\nChannels recreated: **{channels_count}**\nExisting channels/categories were replaced.", color=discord.Color.green())
+        restore_report = await restore_backup(ctx.guild, code=code, replace_channels=True)
+        report = feature_embed("Backup Restored", restore_report.summary() + "\nExisting channels/categories were replaced.", color=discord.Color.green())
         # The command's original channel may have been deleted during the restore.
         target = ctx.guild.system_channel
         if target is None or not target.permissions_for(ctx.guild.me).send_messages:
@@ -5474,15 +5518,15 @@ async def slash_backup_load(interaction: discord.Interaction, code: str = None, 
         return await interaction.response.send_message(
             embed=feature_embed(
                 "Confirmation Required",
-                "This restore will **delete existing channels and removable roles**, then rebuild the saved channels, role permissions, and role hierarchy. `@everyone`, Discord-managed roles, and the built-in `#moderators` channel are preserved.\n"
+                "This restore will **delete existing channels and removable roles**, then rebuild the saved channels, role permissions, and role hierarchy. `@everyone`, Discord-managed roles, roles above Kanade's highest role (skipped), and the built-in `#moderators` channel are preserved.\n"
                 "Run `/backup load` again with the same code and set **confirm** to **True** to proceed.",
                 color=discord.Color.orange(),
             ), ephemeral=True
         )
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        roles_count, channels_count = await restore_backup(guild, code=code, replace_channels=True)
-        await interaction.followup.send(embed=feature_embed("Backup Restored", f"Roles available: **{roles_count}**\nChannels recreated: **{channels_count}**\nExisting channels/categories were replaced."), ephemeral=True)
+        restore_report = await restore_backup(guild, code=code, replace_channels=True)
+        await interaction.followup.send(embed=feature_embed("Backup Restored", restore_report.summary() + "\nExisting channels/categories were replaced."), ephemeral=True)
     except FileNotFoundError:
         await interaction.followup.send(embed=feature_embed("No Backup Found", "Check the code or create a backup first.", color=discord.Color.orange()), ephemeral=True)
     except (ValueError, OSError, RuntimeError, json.JSONDecodeError, discord.HTTPException) as exc:
@@ -8631,27 +8675,52 @@ async def _music_error(ctx, text):
 
 class MusicTrack:
     def __init__(self, *, title, webpage_url, duration=None, thumbnail=None, uploader=None,
-                 requester_id=0, requester_name="Unknown", stream_url=None):
+                 requester_id=0, requester_name="Unknown", stream_url=None, search_query=None):
         self.title = title or "Unknown title"
-        self.webpage_url = webpage_url
+        self.webpage_url = webpage_url      # link shown to users (YouTube, SoundCloud or Spotify)
         self.duration = int(duration) if duration else None
         self.thumbnail = thumbnail
         self.uploader = uploader
         self.requester_id = requester_id
         self.requester_name = requester_name
         self.stream_url = stream_url
+        self.search_query = search_query    # set for Spotify tracks: audio is found on YouTube when played
+        self._yt_url = None
         self.resolved_at = time.monotonic() if stream_url else 0.0
+
+    @staticmethod
+    def _first_entry(data):
+        if data and data.get("entries"):
+            return next((e for e in data["entries"] if e), None)
+        return data
 
     async def ensure_stream(self):
         # Stream URLs expire, so refresh anything older than 20 minutes.
         if self.stream_url and time.monotonic() - self.resolved_at < 1200:
             return
-        info = await _ytdl_run(_ytdl_resolve_sync, self.webpage_url)
-        if info.get("entries"):
-            entries = [e for e in info["entries"] if e]
-            if not entries:
-                raise MusicError("Nothing playable was found for that track.")
-            info = entries[0]
+        info = None
+        try:
+            if self.search_query and not self._yt_url:
+                data = await _ytdl_run(_ytdl_extract_sync, f"ytsearch1:{self.search_query}", flat=False, noplaylist=True)
+                info = self._first_entry(data)
+                if info is None:
+                    raise MusicError("No matching audio was found on YouTube.")
+                self._yt_url = info.get("webpage_url") or info.get("original_url")
+            else:
+                data = await _ytdl_run(_ytdl_resolve_sync, self._yt_url or self.webpage_url)
+                info = self._first_entry(data)
+                if info is None:
+                    raise MusicError("Nothing playable was found for that track.")
+        except MusicError as first_error:
+            # YouTube may block the host; try SoundCloud for the same song before giving up.
+            query = self.search_query or f"{self.title} {self.uploader or ''}".strip()
+            try:
+                data = await _ytdl_run(_ytdl_extract_sync, f"scsearch1:{query}", flat=False, noplaylist=True)
+                info = self._first_entry(data)
+            except MusicError:
+                info = None
+            if info is None:
+                raise first_error
         url = info.get("url")
         if not url:
             raise MusicError("Could not find an audio stream for that track.")
@@ -8659,6 +8728,30 @@ class MusicTrack:
         self.resolved_at = time.monotonic()
         self.duration = self.duration or (int(info["duration"]) if info.get("duration") else None)
         self.thumbnail = self.thumbnail or info.get("thumbnail")
+
+
+def _ytdl_cookie_file():
+    """Cookie file for YouTube. Use YTDLP_COOKIES (a path) or YTDLP_COOKIES_B64 (base64 of cookies.txt, handy on Railway)."""
+    path = os.getenv("YTDLP_COOKIES", "").strip()
+    if path and os.path.isfile(path):
+        return path
+    encoded = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    if encoded:
+        target = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt_cookies.txt")
+        try:
+            import base64
+            with open(target, "wb") as handle:
+                handle.write(base64.b64decode(encoded))
+            return target
+        except Exception:
+            logger.warning("YTDLP_COOKIES_B64 is set but could not be decoded.")
+    return None
+
+
+YTDL_COOKIE_FILE = _ytdl_cookie_file()
+# YouTube player-client sets tried in order when YouTube refuses to give a stream.
+YT_CLIENT_SETS = [None, ["tv", "android_vr"], ["web_safari", "mweb"]]
+_YT_RETRY_PATTERN = re.compile(r"sign in|confirm you|not a bot|format is not available|player response|HTTP Error 403|unavailable on this app", re.IGNORECASE)
 
 
 def _ytdl_base_options():
@@ -8672,21 +8765,35 @@ def _ytdl_base_options():
         "source_address": "0.0.0.0",
         "ignoreerrors": False,
     }
-    cookies = os.getenv("YTDLP_COOKIES", "").strip()
-    if cookies and os.path.isfile(cookies):
-        options["cookiefile"] = cookies
+    if YTDL_COOKIE_FILE:
+        options["cookiefile"] = YTDL_COOKIE_FILE
     return options
 
 
 def _ytdl_extract_sync(query, *, flat, noplaylist, limit=None):
-    options = _ytdl_base_options()
-    options["noplaylist"] = noplaylist
-    if flat:
-        options["extract_flat"] = "in_playlist"
-    if limit:
-        options["playlistend"] = limit
-    with yt_dlp.YoutubeDL(options) as ydl:
-        return ydl.extract_info(query, download=False)
+    is_youtube = "youtu" in query or query.startswith("ytsearch")
+    attempts = [None]
+    if is_youtube and not flat:
+        custom = [c.strip() for c in os.getenv("YTDLP_YT_CLIENTS", "").split(",") if c.strip()]
+        attempts = ([custom] if custom else []) + YT_CLIENT_SETS
+    last_error = None
+    for clients in attempts:
+        options = _ytdl_base_options()
+        options["noplaylist"] = noplaylist
+        if flat:
+            options["extract_flat"] = "in_playlist"
+        if limit:
+            options["playlistend"] = limit
+        if clients:
+            options["extractor_args"] = {"youtube": {"player_client": clients}}
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                return ydl.extract_info(query, download=False)
+        except Exception as exc:
+            last_error = exc
+            if not _YT_RETRY_PATTERN.search(str(exc)):
+                raise
+    raise last_error
 
 
 def _ytdl_resolve_sync(url):
@@ -8703,8 +8810,14 @@ async def _ytdl_run(function, *args, **kwargs):
     except MusicError:
         raise
     except Exception as exc:
-        message = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip().splitlines()
-        raise MusicError((message[-1] if message else "Could not load that media.")[:220])
+        raw = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
+        if re.search(r"sign in to confirm|not a bot", raw, re.IGNORECASE):
+            raise MusicError("YouTube is blocking this host with a bot check. Add exported YouTube cookies "
+                             "(`YTDLP_COOKIES_B64` or `YTDLP_COOKIES`) and restart, and keep yt-dlp updated.")
+        if re.search(r"video unavailable|private video|has been removed", raw, re.IGNORECASE):
+            raise MusicError("That video is unavailable or private.")
+        lines = raw.splitlines()
+        raise MusicError((lines[-1] if lines else "Could not load that media.")[:220])
 
 
 def _music_track_from_info(info, requester, *, resolved=False):
@@ -8732,16 +8845,124 @@ def _music_track_from_info(info, requester, *, resolved=False):
     )
 
 
+SPOTIFY_RE = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-z]{2}/)?|spotify:)(track|album|playlist)[/:]([A-Za-z0-9]{22})", re.IGNORECASE)
+_SPOTIFY_TOKEN = {"value": None, "expires": 0.0}
+
+
+async def _spotify_token(session):
+    if _SPOTIFY_TOKEN["value"] and time.monotonic() < _SPOTIFY_TOKEN["expires"] - 30:
+        return _SPOTIFY_TOKEN["value"]
+    client_id = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise MusicError("Spotify links need `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` set in the bot's environment variables.")
+    try:
+        async with session.post("https://accounts.spotify.com/api/token", data={"grant_type": "client_credentials"},
+                                auth=aiohttp.BasicAuth(client_id, client_secret)) as response:
+            if response.status != 200:
+                raise MusicError("Spotify rejected the configured client ID/secret.")
+            payload = await response.json()
+    except aiohttp.ClientError:
+        raise MusicError("Could not reach Spotify. Try again shortly.")
+    _SPOTIFY_TOKEN["value"] = payload["access_token"]
+    _SPOTIFY_TOKEN["expires"] = time.monotonic() + int(payload.get("expires_in", 3600))
+    return _SPOTIFY_TOKEN["value"]
+
+
+async def _spotify_get(session, url, params=None):
+    token = await _spotify_token(session)
+    try:
+        async with session.get(url, params=params, headers={"Authorization": f"Bearer {token}"}) as response:
+            if response.status == 429:
+                raise MusicError("Spotify is rate limiting requests. Try again in a moment.")
+            if response.status in (401, 403):
+                _SPOTIFY_TOKEN["value"] = None
+                raise MusicError("Spotify would not share that item (it may be private or restricted).")
+            if response.status == 404:
+                raise MusicError("That Spotify link was not found or is private.")
+            if response.status != 200:
+                raise MusicError(f"Spotify returned an error ({response.status}).")
+            return await response.json()
+    except aiohttp.ClientError:
+        raise MusicError("Could not reach Spotify. Try again shortly.")
+
+
+def _spotify_track(item, requester, fallback_image=None):
+    if not item or item.get("is_local") or not item.get("name"):
+        return None
+    artists = [a["name"] for a in item.get("artists", []) if a.get("name")]
+    images = (item.get("album") or {}).get("images") or []
+    return MusicTrack(
+        title=item["name"] + (f" - {', '.join(artists[:2])}" if artists else ""),
+        webpage_url=(item.get("external_urls") or {}).get("spotify") or "https://open.spotify.com",
+        duration=(item.get("duration_ms") or 0) // 1000 or None,
+        thumbnail=(images[0]["url"] if images else fallback_image),
+        uploader=artists[0] if artists else None,
+        requester_id=getattr(requester, "id", 0),
+        requester_name=getattr(requester, "display_name", str(requester)),
+        search_query=f"{artists[0] if artists else ''} {item['name']} audio".strip(),
+    )
+
+
+async def spotify_resolve(kind, spotify_id, requester):
+    """Turn a Spotify track/album/playlist into queue entries; audio is matched on YouTube at play time."""
+    base = "https://api.spotify.com/v1"
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        if kind == "track":
+            item = await _spotify_get(session, f"{base}/tracks/{spotify_id}")
+            track = _spotify_track(item, requester)
+            if track is None:
+                raise MusicError("That Spotify track can't be played.")
+            return [track], None
+        tracks = []
+        if kind == "album":
+            album = await _spotify_get(session, f"{base}/albums/{spotify_id}")
+            cover = (album.get("images") or [{}])[0].get("url")
+            page = album.get("tracks") or {}
+            while page:
+                for item in page.get("items", []):
+                    track = _spotify_track(item, requester, cover)
+                    if track:
+                        tracks.append(track)
+                if len(tracks) >= MUSIC_PLAYLIST_LIMIT or not page.get("next"):
+                    break
+                page = await _spotify_get(session, page["next"])
+            title = album.get("name")
+        else:
+            meta = await _spotify_get(session, f"{base}/playlists/{spotify_id}", {"fields": "name"})
+            title = meta.get("name")
+            page = await _spotify_get(session, f"{base}/playlists/{spotify_id}/tracks", {
+                "limit": 100,
+                "fields": "next,items(track(name,is_local,duration_ms,external_urls,artists(name),album(images)))",
+            })
+            while page:
+                for entry in page.get("items", []):
+                    track = _spotify_track(entry.get("track"), requester)
+                    if track:
+                        tracks.append(track)
+                if len(tracks) >= MUSIC_PLAYLIST_LIMIT or not page.get("next"):
+                    break
+                page = await _spotify_get(session, page["next"])
+        if not tracks:
+            raise MusicError("No playable tracks were found in that Spotify link.")
+        return tracks[:MUSIC_PLAYLIST_LIMIT], title
+
+
 async def music_resolve(query, requester):
     """Return (tracks, playlist_title) for a URL, playlist URL or search phrase."""
     query = (query or "").strip().strip("<>")
     if not query:
         raise MusicError("Provide a song name or link.")
+    spotify = SPOTIFY_RE.search(query)
+    if spotify:
+        return await spotify_resolve(spotify.group(1).lower(), spotify.group(2), requester)
     if re.match(r"^https?://", query, re.IGNORECASE):
         parsed = urlparse(query)
         host = parsed.netloc.lower()
-        if "spotify.com" in host:
-            raise MusicError("Spotify links are not supported. Search by the song name instead.")
+        if "spotify.com" in host or host == "spotify.link":
+            raise MusicError("I can read Spotify track, album and playlist links (open.spotify.com/...). "
+                             "Short or artist links aren't supported; copy the full track/album/playlist link.")
         path = parsed.path.lower()
         is_playlist = any(marker in path for marker in ("/playlist", "/sets/", "/album", "/albums/"))
         if is_playlist:
@@ -9086,6 +9307,41 @@ async def music_destroy(guild_id):
             await voice.disconnect(force=True)
         except Exception:
             pass
+
+
+def _music_startup_report():
+    if yt_dlp is not None:
+        logger.info("yt-dlp %s loaded; cookies %s", getattr(getattr(yt_dlp, "version", None), "__version__", "?"),
+                    "configured" if YTDL_COOKIE_FILE else "not configured")
+        if shutil.which("deno") is None and shutil.which("node") is None:
+            logger.warning("No JavaScript runtime (deno/node) found. Recent yt-dlp releases need one to read YouTube.")
+    if shutil.which("ffmpeg") is None:
+        logger.warning("ffmpeg was not found on PATH; music playback will not work.")
+    if not (os.getenv("SPOTIFY_CLIENT_ID") and os.getenv("SPOTIFY_CLIENT_SECRET")):
+        logger.info("Spotify credentials not set; Spotify links will ask for SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET.")
+
+
+_music_startup_report()
+
+
+@bot.command(name="ytupdate", aliases=["updateytdlp"])
+async def music_ytupdate_command(ctx):
+    """Bot staff: upgrade yt-dlp in the running environment (restart the bot afterwards)."""
+    if not await global_staff_check(ctx):
+        return
+    async with ctx.typing():
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pip", "install", "-U", "--break-system-packages", "yt-dlp",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            process.kill()
+            return await ctx.reply("The update timed out.", mention_author=False)
+    tail = output.decode(errors="replace").strip().splitlines()[-1:] or ["Done."]
+    await ctx.reply(embed=feature_embed("yt-dlp Update", f"{tail[0][:300]}\nRestart the bot to load the new version. "
+                                        "For a permanent fix, keep `yt-dlp` unpinned in requirements so each deploy pulls the latest."), mention_author=False)
 
 
 # ----- permissions -----
