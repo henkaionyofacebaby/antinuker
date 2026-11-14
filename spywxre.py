@@ -8721,13 +8721,29 @@ class MusicTrack:
                 info = None
             if info is None:
                 raise first_error
-        url = info.get("url")
+        url = _stream_url_from_info(info)
         if not url:
-            raise MusicError("Could not find an audio stream for that track.")
+            raise MusicError("YouTube returned no playable audio for this track. This is usually the bot check: "
+                             "add YouTube cookies (`YTDLP_COOKIES_B64`), keep yt-dlp updated, and make sure deno or node is installed.")
         self.stream_url = url
         self.resolved_at = time.monotonic()
         self.duration = self.duration or (int(info["duration"]) if info.get("duration") else None)
         self.thumbnail = self.thumbnail or info.get("thumbnail")
+
+
+def _stream_url_from_info(info):
+    """Find a playable audio URL in a yt-dlp info dict."""
+    if info.get("url"):
+        return info["url"]
+    for fmt in info.get("requested_formats") or []:
+        if fmt.get("url") and fmt.get("acodec") not in (None, "none"):
+            return fmt["url"]
+    audio = [f for f in (info.get("formats") or []) if f.get("url") and f.get("acodec") not in (None, "none")
+             and f.get("protocol", "") not in ("mhtml",)]
+    if audio:
+        audio.sort(key=lambda f: (f.get("vcodec") in (None, "none"), f.get("abr") or 0), reverse=True)
+        return audio[0]["url"]
+    return None
 
 
 def _ytdl_cookie_file():
@@ -8869,6 +8885,50 @@ async def _spotify_token(session):
     return _SPOTIFY_TOKEN["value"]
 
 
+class SpotifyAccessError(MusicError):
+    """Spotify's API refused the request (403/401)."""
+
+
+async def _spotify_scrape_track(spotify_id, requester):
+    """Credential-free fallback for single tracks: read title/artist from the public track page."""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+               "Accept-Language": "en-US,en;q=0.9"}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=headers) as session:
+            async with session.get(f"https://open.spotify.com/track/{spotify_id}") as response:
+                if response.status != 200:
+                    return None
+                page = await response.text()
+    except aiohttp.ClientError:
+        return None
+
+    def meta(name):
+        match = re.search(r'<meta[^>]+(?:property|name)="' + name + r'"[^>]+content="([^"]*)"', page)
+        return html.unescape(match.group(1)).strip() if match else None
+
+    title = artist = None
+    heading = re.search(r"<title>(.+?)</title>", page, re.S)
+    if heading:
+        parsed = re.match(r"(.+?) - (?:song|single)(?: and lyrics)? by (.+?) \| Spotify", html.unescape(heading.group(1)).strip())
+        if parsed:
+            title, artist = parsed.group(1).strip(), parsed.group(2).strip()
+    if not title:
+        title = meta("og:title")
+        description = meta("og:description") or ""
+        artist = description.split("·")[0].strip() if "·" in description else None
+    if not title:
+        return None
+    return MusicTrack(
+        title=f"{title} - {artist}" if artist else title,
+        webpage_url=f"https://open.spotify.com/track/{spotify_id}",
+        thumbnail=meta("og:image"),
+        uploader=artist,
+        requester_id=getattr(requester, "id", 0),
+        requester_name=getattr(requester, "display_name", str(requester)),
+        search_query=f"{artist or ''} {title} audio".strip(),
+    )
+
+
 async def _spotify_get(session, url, params=None):
     token = await _spotify_token(session)
     try:
@@ -8877,7 +8937,9 @@ async def _spotify_get(session, url, params=None):
                 raise MusicError("Spotify is rate limiting requests. Try again in a moment.")
             if response.status in (401, 403):
                 _SPOTIFY_TOKEN["value"] = None
-                raise MusicError("Spotify would not share that item (it may be private or restricted).")
+                logger.warning("Spotify API refused %s (%s): %s", url, response.status, (await response.text())[:300])
+                raise SpotifyAccessError("Spotify's API refused this request. If this happens for every link, your Spotify "
+                                         "developer app is restricted (check the app's status/owner account in the Spotify dashboard).")
             if response.status == 404:
                 raise MusicError("That Spotify link was not found or is private.")
             if response.status != 200:
@@ -8910,7 +8972,13 @@ async def spotify_resolve(kind, spotify_id, requester):
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         if kind == "track":
-            item = await _spotify_get(session, f"{base}/tracks/{spotify_id}")
+            try:
+                item = await _spotify_get(session, f"{base}/tracks/{spotify_id}")
+            except SpotifyAccessError as exc:
+                fallback = await _spotify_scrape_track(spotify_id, requester)
+                if fallback is None:
+                    raise exc
+                return [fallback], None
             track = _spotify_track(item, requester)
             if track is None:
                 raise MusicError("That Spotify track can't be played.")
