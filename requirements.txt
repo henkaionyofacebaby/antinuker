@@ -9,3 +9,11 @@ ffmpeg
 FFmpeg
 ffmpeg-python
 yt-dlp[default]
+aiohttp
+discord.py[voice]
+psutil
+PyNaCl
+davey
+Pillow
+yt-dlp[default]
+imageio-ffmpeg
